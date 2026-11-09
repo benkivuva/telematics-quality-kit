@@ -8,8 +8,10 @@ from telematics.backends.simulator import SimulatorBackend
 from telematics.clock import ManualClock
 from telematics.codecs.gt06 import GT06Codec
 from telematics.codecs.teltonika import TeltonikaCodec
-from telematics.ingest.events import Decoded, FrameReceived, Stored
+from telematics.config import DriftConfig
+from telematics.ingest.events import Decoded, FaultCleared, FaultInjected, FrameReceived, Stored
 from telematics.ingest.tap import EventTap
+from telematics.quality.drift import DriftCheck
 from telematics.simulator.generator import Simulator
 
 
@@ -160,3 +162,51 @@ def test_fault_duration_expires_and_reporting_resumes() -> None:
 
     assert not backend._active_faults
     assert backend.get_points("TRK-0001")[-1].device_time == start + timedelta(minutes=1)
+
+
+@pytest.mark.unit
+def test_backend_publishes_fault_injection_and_clear_events() -> None:
+    start = datetime(2024, 4, 5, 6, 7, 8, tzinfo=UTC)
+    tap = EventTap()
+    subscription = tap.subscribe(maxsize=64)
+    backend = SimulatorBackend(seed=42, clock=ManualClock(start), vehicles=1, event_tap=tap)
+    while not subscription.empty():
+        subscription.get_nowait()
+
+    backend.inject_fault("TRK-0001", "stale_device", {"severity": "high"})
+    injected_events = []
+    while not subscription.empty():
+        injected_events.append(subscription.get_nowait())
+    backend.reset_simulator()
+    cleared_events = []
+    while not subscription.empty():
+        cleared_events.append(subscription.get_nowait())
+    injected = next(event for event in injected_events if isinstance(event, FaultInjected))
+    cleared = next(event for event in cleared_events if isinstance(event, FaultCleared))
+
+    assert isinstance(injected, FaultInjected)
+    assert injected.vehicle_id == "TRK-0001"
+    assert isinstance(cleared, FaultCleared)
+    assert cleared.fault == "stale_device"
+
+
+@pytest.mark.unit
+def test_gps_drift_changes_coordinates_through_the_codec_path() -> None:
+    start = datetime(2024, 4, 5, 6, 7, 8, tzinfo=UTC)
+
+    def points_after(inject: bool):
+        backend = SimulatorBackend(seed=42, clock=ManualClock(start), vehicles=1)
+        if inject:
+            backend.inject_fault("TRK-0001", "gps_drift", {"severity": "high"})
+        backend.advance(timedelta(minutes=5))
+        return backend.get_points("TRK-0001")
+
+    baseline = points_after(False)
+    drifted = points_after(True)
+    assert len(drifted) == len(baseline)
+    assert any(first.latitude != second.latitude for first, second in zip(baseline, drifted))
+    profile = SimulatorBackend(seed=42, clock=ManualClock(start), vehicles=1).get_profile(
+        "TRK-0001"
+    )
+    quality = DriftCheck(DriftConfig()).evaluate(drifted, max_speed_kph=profile.max_speed_kph)
+    assert quality.metric["flagged_points"] > 0

@@ -3,12 +3,15 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from math import sin, tau
+from threading import RLock
 from typing import Literal
 
 from telematics.clock import Clock
 from telematics.codecs.base import Codec
 from telematics.codecs.gt06 import GT06Codec
 from telematics.codecs.teltonika import TeltonikaCodec
+from telematics.ingest.events import FaultCleared, FaultInjected
 from telematics.ingest.pipeline import IngestPipeline
 from telematics.ingest.tap import EventTap
 from telematics.models.telemetry import TelemetryPoint
@@ -39,6 +42,7 @@ class SimulatorBackend:
         profile_mix: Mapping[str, int] | None = None,
         event_tap: EventTap | None = None,
     ) -> None:
+        self._lock = RLock()
         self._store = MemoryPointStore()
         self._clock = clock
         self.event_tap = event_tap if event_tap is not None else EventTap()
@@ -76,10 +80,15 @@ class SimulatorBackend:
         return self._vehicle_ids
 
     def get_points(self, vehicle_id: str) -> tuple[TelemetryPoint, ...]:
-        return tuple(self._store.points(vehicle_id))
+        with self._lock:
+            return tuple(self._store.points(vehicle_id))
 
     def advance(self, duration: timedelta) -> datetime:
         """Advance simulated time and ingest deterministic profile-cadence frames."""
+        with self._lock:
+            return self._advance(duration)
+
+    def _advance(self, duration: timedelta) -> datetime:
         if duration <= timedelta(0):
             raise ValueError("simulator advance duration must be positive")
         advance_clock = getattr(self._clock, "advance", None)
@@ -142,6 +151,24 @@ class SimulatorBackend:
         params: Mapping[str, int | float | str],
     ) -> tuple[str, str]:
         """Apply a reversible simulator fault before frames enter their parser."""
+        with self._lock:
+            return self._inject_fault(vehicle_id, fault, params)
+
+    def _inject_fault(
+        self,
+        vehicle_id: str,
+        fault: Literal[
+            "stale_device",
+            "gps_drift",
+            "rural_blackout",
+            "duplicate_heartbeats",
+            "ignition_flicker",
+            "clock_skew",
+            "fuel_sensor_spike",
+            "buffered_burst",
+        ],
+        params: Mapping[str, int | float | str],
+    ) -> tuple[str, str]:
         if vehicle_id not in self._frames:
             raise ValueError(f"unknown simulator vehicle {vehicle_id}")
         self._severity_multiplier(params)
@@ -165,12 +192,20 @@ class SimulatorBackend:
             "fuel_sensor_spike": "fuel sensor quality degrades",
             "buffered_burst": "duplicate and ordering checks are exercised",
         }[fault]
+        self.event_tap.publish(FaultInjected(vehicle_id, fault, impact))
         return fault_id, impact
 
     def reset_simulator(self) -> int:
         """Clear simulator faults and restore original encoded frames."""
-        cleared = len(self._active_faults)
+        with self._lock:
+            return self._reset_simulator()
+
+    def _reset_simulator(self) -> int:
+        active_faults = tuple(self._active_faults.values())
+        cleared = len(active_faults)
         self._active_faults.clear()
+        for active in active_faults:
+            self.event_tap.publish(FaultCleared(active.vehicle_id, active.name))
         self._rebuild_store()
         return cleared
 
@@ -178,13 +213,14 @@ class SimulatorBackend:
         """Remove faults whose injected-clock duration has elapsed."""
         now = self._clock.now()
         expired = [
-            fault_id
+            (fault_id, active)
             for fault_id, active in self._active_faults.items()
             if active.expires_at is not None and active.expires_at <= now
         ]
         if expired:
-            for fault_id in expired:
+            for fault_id, active in expired:
                 del self._active_faults[fault_id]
+                self.event_tap.publish(FaultCleared(active.vehicle_id, active.name))
             self._rebuild_store()
         return bool(expired)
 
@@ -262,7 +298,11 @@ class SimulatorBackend:
             duration = timedelta(minutes=10 * multiplier)
             return replace(point, device_time=point.device_time - duration)
         if fault == "gps_drift":
-            return replace(point, latitude=min(89.9, point.latitude + 0.1 * multiplier))
+            # Vary drift by the generated course so consecutive encoded fixes can
+            # produce impossible movement, while remaining deterministic per frame.
+            course_phase = point.course_deg / 360 * tau
+            offset = sin(course_phase) * 0.1 * multiplier
+            return replace(point, latitude=min(89.9, max(-89.9, point.latitude + offset)))
         if fault == "ignition_flicker":
             return replace(point, ignition_on=not bool(point.ignition_on))
         if fault == "fuel_sensor_spike":

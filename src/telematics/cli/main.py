@@ -1,19 +1,34 @@
 """Command-line dispatch for the embedded vertical slice."""
 
 import argparse
+import math
+import shlex
 import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event, Thread
 
 from telematics.backends.simulator import SimulatorBackend
+from telematics.cli.doctor import doctor as run_doctor
+from telematics.cli.init import init_command
 from telematics.cli.inject import inject_and_wait
 from telematics.cli.session import AttachedSession, EmbeddedSession, create_embedded_session
 from telematics.cli.shell import Shell, execute_command, run_script
+from telematics.cli.stream import add_stream_parser
+from telematics.cli.stream import stream as run_stream
 from telematics.clock import ManualClock
 from telematics.config import FreshnessConfig
 from telematics.mcp.server import create_server
+from telematics.report.builder import (
+    FaultSpec,
+    build_report_data,
+    load_scenario_file,
+    parse_fault_spec,
+)
+from telematics.report.render import render_report
 from telematics.service.vehicles import VehicleService
+from telematics.simulator.realtime import SimulatorClockDriver
 
 _SIMULATION_START = datetime(2024, 4, 5, 6, 7, 8, tzinfo=UTC)
 
@@ -80,6 +95,18 @@ def _port_number(value: str) -> int:
     return port
 
 
+def _parse_speed(value: str) -> float:
+    """Parse a positive simulator speed such as ``1x`` or ``60x``."""
+    raw = value[:-1] if value.lower().endswith("x") else value
+    try:
+        speed = float(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("speed must look like 1x or 60x") from exc
+    if not math.isfinite(speed) or speed <= 0:
+        raise argparse.ArgumentTypeError("speed must be a positive finite value")
+    return speed
+
+
 def _duration_seconds(value: str) -> float:
     """Parse a positive duration written as an integer and s, m, or h."""
     try:
@@ -90,6 +117,100 @@ def _duration_seconds(value: str) -> float:
     if amount <= 0:
         raise argparse.ArgumentTypeError("duration must be positive")
     return float(amount * scale)
+
+
+def _positive_detail(value: str) -> int:
+    try:
+        detail = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("detail must be an integer from 1 to 200") from exc
+    if not 1 <= detail <= 200:
+        raise argparse.ArgumentTypeError("detail must be between 1 and 200")
+    return detail
+
+
+def _report(args: argparse.Namespace) -> int:
+    try:
+        scenario = load_scenario_file(args.scenario) if args.scenario else None
+        if args.clean and args.inject:
+            raise ValueError("--clean cannot be combined with --inject")
+        faults: tuple[FaultSpec, ...] | None
+        if args.clean:
+            faults = ()
+        elif scenario is not None or args.inject:
+            faults = tuple(scenario.faults if scenario is not None else ()) + tuple(
+                parse_fault_spec(item) for item in args.inject
+            )
+        else:
+            faults = None
+        seed = args.seed if args.seed is not None else scenario.seed if scenario else 42
+        vehicle_count = (
+            args.vehicles if args.vehicles is not None else scenario.vehicles if scenario else 12
+        )
+        duration_seconds = (
+            args.duration
+            if args.duration is not None
+            else scenario.duration.total_seconds()
+            if scenario
+            else 3600
+        )
+        profile_mix = (
+            args.profile_mix
+            if args.profile_mix is not None
+            else scenario.profile_mix
+            if scenario
+            else None
+        )
+        command_parts = [
+            "telematics report",
+            f"--vehicles {vehicle_count}",
+            f"--seed {seed}",
+            f"--duration {int(duration_seconds)}s",
+            f"--fault-duration {int(args.fault_duration)}s",
+            f"--detail {args.detail}",
+        ]
+        if args.scenario:
+            command_parts.append(f"--scenario {shlex.quote(args.scenario)}")
+        elif args.clean:
+            command_parts.append("--clean")
+        command_parts.extend(f"--inject {shlex.quote(item)}" for item in args.inject)
+        if args.profile_mix is not None:
+            mix_text = ",".join(f"{key}={value}" for key, value in args.profile_mix.items())
+            command_parts.append(f"--profile-mix {mix_text}")
+        report_data = build_report_data(
+            seed=seed,
+            vehicles=vehicle_count,
+            duration=timedelta(seconds=duration_seconds),
+            fault_duration=timedelta(seconds=args.fault_duration),
+            clean=args.clean,
+            faults=faults,
+            scenario_name=scenario.name if scenario else None,
+            detail=args.detail,
+            profile_mix=profile_mix,
+            command=" ".join(command_parts),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"invalid report inputs: {exc}", file=sys.stderr)
+        return 2
+    html = render_report(report_data)
+    target = Path(args.out)
+    try:
+        target.write_text(html, encoding="utf-8", newline="\n")
+    except OSError as exc:
+        print(f"cannot write report {target}: {exc}", file=sys.stderr)
+        return 4
+    size = len(html.encode("utf-8"))
+    if size > 5 * 1024 * 1024:
+        print(
+            f"warning: report is {size} bytes (over 5 MB); lower --detail to reduce its size",
+            file=sys.stderr,
+        )
+    if args.open:
+        import webbrowser
+
+        webbrowser.open(target.resolve().as_uri())
+    print(f"wrote report to {target}")
+    return 0
 
 
 def _shell(
@@ -133,6 +254,7 @@ def _serve(
     transport: str,
     host: str,
     port: int,
+    speed: float = 1.0,
 ) -> int:
     """Run the embedded simulated fleet over the selected MCP transport."""
     clock = ManualClock(_SIMULATION_START)
@@ -144,10 +266,18 @@ def _serve(
     )
     service = VehicleService(backend, FreshnessConfig())
     server = create_server(service, as_of=clock.now(), clock=clock)
-    if transport == "stdio":
-        server.run(transport="stdio")
-    else:
-        server.run(transport="streamable-http", host=host, port=port)
+    stop = Event()
+    driver = SimulatorClockDriver(backend, speed=speed)
+    clock_thread = Thread(target=driver.run, args=(stop,), daemon=True)
+    clock_thread.start()
+    try:
+        if transport == "stdio":
+            server.run(transport="stdio")
+        else:
+            server.run(transport="streamable-http", host=host, port=port)
+    finally:
+        stop.set()
+        clock_thread.join()
     return 0
 
 
@@ -167,6 +297,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=_port_number, default=8000)
+    serve.add_argument("--speed", type=_parse_speed, default=1.0)
     shell_parser = commands.add_parser("shell", help="open the developer command shell")
     shell_parser.add_argument("--vehicles", type=_positive_vehicle_count, default=12)
     shell_parser.add_argument("--seed", type=int, default=42)
@@ -185,6 +316,24 @@ def main(argv: list[str] | None = None) -> int:
     inject.add_argument("--url", default="http://127.0.0.1:8000/mcp")
     inject.add_argument("--wait", nargs="?", const="30s", type=_duration_seconds)
     inject.add_argument("--expect", choices=("PASS", "WARN", "BLOCK"), default="BLOCK")
+    add_stream_parser(commands)
+    init_parser = commands.add_parser("init", help="write or print a starter template")
+    init_parser.add_argument("template", choices=("fleet", "scenario", "script"))
+    init_parser.add_argument("path", nargs="?")
+    commands.add_parser("doctor", help="check the local development environment")
+    report = commands.add_parser("report", help="write a self-contained static fleet report")
+    report.add_argument("--vehicles", type=_positive_vehicle_count)
+    report.add_argument("--seed", type=int)
+    report_source = report.add_mutually_exclusive_group()
+    report_source.add_argument("--scenario")
+    report_source.add_argument("--clean", action="store_true")
+    report.add_argument("--inject", action="append", default=[])
+    report.add_argument("--duration", type=_duration_seconds)
+    report.add_argument("--fault-duration", type=_duration_seconds, default=1200.0)
+    report.add_argument("--detail", type=_positive_detail, default=50)
+    report.add_argument("--profile-mix", type=_parse_profile_mix)
+    report.add_argument("--out", default="fleet-report.html")
+    report.add_argument("--open", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "demo":
         return _demo(vehicles=args.vehicles, seed=args.seed)
@@ -196,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
             transport=args.transport,
             host=args.host,
             port=args.port,
+            speed=args.speed,
         )
     if args.command == "shell":
         return _shell(
@@ -216,4 +366,23 @@ def main(argv: list[str] | None = None) -> int:
             expected=args.expect,
             timeout_seconds=args.wait,
         )
+    if args.command == "stream":
+        if args.rate < 1:
+            parser.error("stream rate must be positive")
+        return run_stream(
+            vehicles=args.vehicles,
+            seed=args.seed,
+            rate=args.rate,
+            vehicle_id=args.vehicle,
+            stages=set(args.stage) if args.stage else None,
+            issues_only=args.issues_only,
+            show_hex=args.hex,
+            as_json=args.json,
+        )
+    if args.command == "init":
+        return init_command(args.template, args.path)
+    if args.command == "doctor":
+        return run_doctor()
+    if args.command == "report":
+        return _report(args)
     return 0

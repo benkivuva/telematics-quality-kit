@@ -31,5 +31,7 @@ jobs:
         run: uv run mypy src/telematics
       - name: Test
         run: uv run pytest
-      - name: CLI help smoke
-        run: uvx --from . telematics-quality-kit --help
+      - name: CLI smoke
+        run: |
+          uv run pytest tests/cli
+          uv run telematics --help
