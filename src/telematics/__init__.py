@@ -12,4 +12,3 @@ def main() -> None:
         description="A deterministic testbed for telematics data quality.",
     )
     parser.parse_args()
-
