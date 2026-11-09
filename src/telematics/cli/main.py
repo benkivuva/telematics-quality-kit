@@ -1,10 +1,15 @@
 """Command-line dispatch for the embedded vertical slice."""
 
 import argparse
+import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from telematics.backends.simulator import SimulatorBackend
+from telematics.cli.inject import inject_and_wait
+from telematics.cli.session import AttachedSession, EmbeddedSession, create_embedded_session
+from telematics.cli.shell import Shell, execute_command, run_script
 from telematics.clock import ManualClock
 from telematics.config import FreshnessConfig
 from telematics.mcp.server import create_server
@@ -75,6 +80,51 @@ def _port_number(value: str) -> int:
     return port
 
 
+def _duration_seconds(value: str) -> float:
+    """Parse a positive duration written as an integer and s, m, or h."""
+    try:
+        amount = int(value[:-1])
+        scale = {"s": 1, "m": 60, "h": 3600}[value[-1]]
+    except (ValueError, IndexError, KeyError) as exc:
+        raise argparse.ArgumentTypeError("duration must look like 30s, 6m, or 1h") from exc
+    if amount <= 0:
+        raise argparse.ArgumentTypeError("duration must be positive")
+    return float(amount * scale)
+
+
+def _shell(
+    *,
+    vehicles: int,
+    seed: int,
+    profile_mix: Mapping[str, int] | None,
+    attach: str | None,
+    command: str | None,
+    script: str | None,
+) -> int:
+    session: EmbeddedSession | AttachedSession
+    if attach is None:
+        session = create_embedded_session(
+            vehicles=vehicles,
+            seed=seed,
+            start=_SIMULATION_START,
+            profile_mix=dict(profile_mix) if profile_mix is not None else None,
+        )
+    else:
+        session = AttachedSession(attach)
+    if command is not None:
+        return execute_command(session, command)
+    shell = Shell(session)
+    if script is not None:
+        try:
+            contents = Path(script).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"cannot read script {script}: {exc}", file=sys.stderr)
+            return 4
+        return run_script(shell, contents)
+    shell.cmdloop()
+    return 0
+
+
 def _serve(
     *,
     vehicles: int,
@@ -93,7 +143,7 @@ def _serve(
         profile_mix=profile_mix,
     )
     service = VehicleService(backend, FreshnessConfig())
-    server = create_server(service, as_of=clock.now())
+    server = create_server(service, as_of=clock.now(), clock=clock)
     if transport == "stdio":
         server.run(transport="stdio")
     else:
@@ -117,6 +167,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=_port_number, default=8000)
+    shell_parser = commands.add_parser("shell", help="open the developer command shell")
+    shell_parser.add_argument("--vehicles", type=_positive_vehicle_count, default=12)
+    shell_parser.add_argument("--seed", type=int, default=42)
+    shell_parser.add_argument("--profile-mix", type=_parse_profile_mix)
+    shell_parser.add_argument(
+        "--attach", nargs="?", const="http://127.0.0.1:8000/mcp", metavar="URL"
+    )
+    shell_mode = shell_parser.add_mutually_exclusive_group()
+    shell_mode.add_argument("-c", dest="shell_command")
+    shell_mode.add_argument("--script")
+    inject = commands.add_parser("inject", help="inject a fault into an attached simulator")
+    inject.add_argument("fault")
+    inject.add_argument("--vehicle", required=True)
+    inject.add_argument("--severity", choices=("low", "medium", "high"), default="medium")
+    inject.add_argument("--duration")
+    inject.add_argument("--url", default="http://127.0.0.1:8000/mcp")
+    inject.add_argument("--wait", nargs="?", const="30s", type=_duration_seconds)
+    inject.add_argument("--expect", choices=("PASS", "WARN", "BLOCK"), default="BLOCK")
     args = parser.parse_args(argv)
     if args.command == "demo":
         return _demo(vehicles=args.vehicles, seed=args.seed)
@@ -128,5 +196,24 @@ def main(argv: list[str] | None = None) -> int:
             transport=args.transport,
             host=args.host,
             port=args.port,
+        )
+    if args.command == "shell":
+        return _shell(
+            vehicles=args.vehicles,
+            seed=args.seed,
+            profile_mix=args.profile_mix,
+            attach=args.attach,
+            command=args.shell_command,
+            script=args.script,
+        )
+    if args.command == "inject":
+        return inject_and_wait(
+            AttachedSession(args.url),
+            fault=args.fault,
+            vehicle_id=args.vehicle,
+            severity=args.severity,
+            duration=args.duration,
+            expected=args.expect,
+            timeout_seconds=args.wait,
         )
     return 0

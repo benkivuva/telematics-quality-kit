@@ -11,6 +11,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
+from telematics.clock import Clock
 from telematics.mcp import schemas
 from telematics.mcp.prompts import register_prompts
 from telematics.mcp.resources import register_resources
@@ -126,9 +127,14 @@ def _evaluate(
     return service.evaluate_vehicle(vehicle_id, as_of=as_of, start=start, end=end)
 
 
-def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
+def create_server(
+    service: VehicleService, *, as_of: datetime, clock: Clock | None = None
+) -> MCPServer:
     """Build an MCP server with the contract's 11 v0.1 tools."""
     server = MCPServer(name="telematics-quality-kit", version="0.1.0")
+
+    def current_time() -> datetime:
+        return clock.now() if clock is not None else as_of
 
     @server.tool(
         name="list_vehicles",
@@ -139,12 +145,14 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
     @_structured_errors
     def list_vehicles(limit: int = 50, cursor: str | None = None) -> schemas.ListVehiclesOutput:
         request = schemas.ListVehiclesInput.model_validate({"limit": limit, "cursor": cursor})
-        summaries = service.list_vehicles(as_of=as_of, limit=request.limit, cursor=request.cursor)
+        summaries = service.list_vehicles(
+            as_of=current_time(), limit=request.limit, cursor=request.cursor
+        )
         ids = service.list_vehicle_ids()
         last_id = summaries[-1].vehicle_id if summaries else None
         next_cursor = last_id if last_id is not None and ids.index(last_id) < len(ids) - 1 else None
         return schemas.ListVehiclesOutput(
-            vehicles=[_vehicle_output(item, as_of=as_of) for item in summaries],
+            vehicles=[_vehicle_output(item, as_of=current_time()) for item in summaries],
             next_cursor=next_cursor,
         )
 
@@ -157,7 +165,7 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
     @_structured_errors
     def get_vehicle_location(vehicle_id: str) -> schemas.VehicleLocationOutput:
         request = schemas.VehicleIdInput.model_validate({"vehicle_id": vehicle_id})
-        item = _evaluate(service, request.vehicle_id, as_of=as_of)
+        item = _evaluate(service, request.vehicle_id, as_of=current_time())
         return schemas.VehicleLocationOutput(
             vehicle_id=item.vehicle_id,
             device_time=item.latest.device_time,
@@ -167,7 +175,7 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
             age_seconds=item.data_quality.age_seconds,
             data_quality=_quality_output(
                 item.data_quality,
-                as_of=as_of,
+                as_of=current_time(),
                 start=item.points[0].device_time,
                 end=item.latest.device_time,
             ),
@@ -190,12 +198,12 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
             {"vehicle_id": vehicle_id, "start": start, "end": end, "last": last}
         )
         window_start, window_end = _bounds(
-            as_of=as_of, last=request.last, start=request.start, end=request.end
+            as_of=current_time(), last=request.last, start=request.start, end=request.end
         )
         item = _evaluate(
             service,
             request.vehicle_id,
-            as_of=as_of,
+            as_of=current_time(),
             start=window_start,
             end=window_end,
         )
@@ -212,7 +220,7 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
             ],
             data_quality=_quality_output(
                 item.data_quality,
-                as_of=as_of,
+                as_of=current_time(),
                 start=window_start,
                 end=window_end,
             ),
@@ -235,7 +243,7 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
             {"vehicle_id": vehicle_id, "start": start, "end": end, "last": last}
         )
         window_start, window_end = _bounds(
-            as_of=as_of, last=request.last, start=request.start, end=request.end
+            as_of=current_time(), last=request.last, start=request.start, end=request.end
         )
         ids = (request.vehicle_id,) if request.vehicle_id else service.list_vehicle_ids()
         events: list[schemas.FuelEventOutput] = []
@@ -243,7 +251,7 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
             item = _evaluate(
                 service,
                 identifier,
-                as_of=as_of,
+                as_of=current_time(),
                 start=window_start,
                 end=window_end,
             )
@@ -257,12 +265,12 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
                         quality_flag="unexplained_drop",
                     )
                 )
-        representative = service.list_vehicles(as_of=as_of, limit=1)[0]
+        representative = service.list_vehicles(as_of=current_time(), limit=1)[0]
         return schemas.FuelEventsOutput(
             events=events,
             data_quality=_quality_output(
                 representative.data_quality,
-                as_of=as_of,
+                as_of=current_time(),
                 start=window_start,
                 end=window_end,
             ),
@@ -282,7 +290,7 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
             {"vehicle_id": vehicle_id, "verbose": verbose}
         )
         ids = (request.vehicle_id,) if request.vehicle_id else service.list_vehicle_ids()
-        summaries = [_evaluate(service, identifier, as_of=as_of) for identifier in ids]
+        summaries = [_evaluate(service, identifier, as_of=current_time()) for identifier in ids]
         score = (
             sum(item.data_quality.trust_score for item in summaries) / len(summaries)
             if summaries
@@ -292,7 +300,8 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
             vehicle_id=request.vehicle_id,
             fleet_trust_score=score,
             vehicles=[
-                _vehicle_output(item, as_of=as_of, verbose=request.verbose) for item in summaries
+                _vehicle_output(item, as_of=current_time(), verbose=request.verbose)
+                for item in summaries
             ],
         )
 
@@ -306,10 +315,10 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
     def check_fleet_freshness() -> schemas.FleetFreshnessOutput:
         request = schemas.FleetFreshnessInput.model_validate({})
         del request
-        summaries = service.list_vehicles(as_of=as_of, limit=200)
+        summaries = service.list_vehicles(as_of=current_time(), limit=200)
         representative = summaries[0]
         return schemas.FleetFreshnessOutput(
-            fleet_trust_score=service.fleet_trust_score(as_of=as_of),
+            fleet_trust_score=service.fleet_trust_score(as_of=current_time()),
             vehicles=[
                 schemas.FleetFreshnessVehicleOutput(
                     vehicle_id=item.vehicle_id,
@@ -320,7 +329,7 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
             ],
             data_quality=_quality_output(
                 representative.data_quality,
-                as_of=as_of,
+                as_of=current_time(),
                 start=representative.points[0].device_time,
                 end=representative.latest.device_time,
             ),
@@ -343,12 +352,12 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
             {"vehicle_id": vehicle_id, "start": start, "end": end, "last": last}
         )
         window_start, window_end = _bounds(
-            as_of=as_of, last=request.last, start=request.start, end=request.end
+            as_of=current_time(), last=request.last, start=request.start, end=request.end
         )
         item = _evaluate(
             service,
             request.vehicle_id,
-            as_of=as_of,
+            as_of=current_time(),
             start=window_start,
             end=window_end,
         )
@@ -361,7 +370,7 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
             flagged_fraction=float(check.metric["flagged_fraction"]),
             data_quality=_quality_output(
                 item.data_quality,
-                as_of=as_of,
+                as_of=current_time(),
                 start=window_start,
                 end=window_end,
             ),
@@ -383,14 +392,14 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
             {"start": start, "end": end, "last": last}
         )
         window_start, window_end = _bounds(
-            as_of=as_of, last=request.last, start=request.start, end=request.end
+            as_of=current_time(), last=request.last, start=request.start, end=request.end
         )
         checks: list[CheckResult] = []
         for identifier in service.list_vehicle_ids():
             item = _evaluate(
                 service,
                 identifier,
-                as_of=as_of,
+                as_of=current_time(),
                 start=window_start,
                 end=window_end,
             )
@@ -413,8 +422,8 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
                 default=Verdict.PASS,
             ).value,
             data_quality=_quality_output(
-                service.list_vehicles(as_of=as_of, limit=1)[0].data_quality,
-                as_of=as_of,
+                service.list_vehicles(as_of=current_time(), limit=1)[0].data_quality,
+                as_of=current_time(),
                 start=window_start,
                 end=window_end,
             ),
@@ -432,7 +441,7 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
         min_level = 1 if request.min_verdict == "WARN" else 2
         issues: list[schemas.QualityIssueOutput] = []
         for identifier in service.list_vehicle_ids():
-            item = _evaluate(service, identifier, as_of=as_of)
+            item = _evaluate(service, identifier, as_of=current_time())
             for check in item.data_quality.checks:
                 level = list(Verdict).index(check.verdict)
                 if level >= min_level:
@@ -453,12 +462,12 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
                 issue.check,
             )
         )
-        representative = service.list_vehicles(as_of=as_of, limit=1)[0]
+        representative = service.list_vehicles(as_of=current_time(), limit=1)[0]
         return schemas.QualityIssuesOutput(
             issues=issues,
             data_quality=_quality_output(
                 representative.data_quality,
-                as_of=as_of,
+                as_of=current_time(),
                 start=representative.points[0].device_time,
                 end=representative.latest.device_time,
             ),
@@ -491,10 +500,12 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
                 fault=request.fault,
                 expected_quality_impact=impact,
                 data_quality=_quality_output(
-                    service.list_vehicles(as_of=as_of, limit=1)[0].data_quality,
-                    as_of=as_of,
-                    start=service.list_vehicles(as_of=as_of, limit=1)[0].points[0].device_time,
-                    end=service.list_vehicles(as_of=as_of, limit=1)[0].latest.device_time,
+                    service.list_vehicles(as_of=current_time(), limit=1)[0].data_quality,
+                    as_of=current_time(),
+                    start=service.list_vehicles(as_of=current_time(), limit=1)[0]
+                    .points[0]
+                    .device_time,
+                    end=service.list_vehicles(as_of=current_time(), limit=1)[0].latest.device_time,
                 ),
             )
 
@@ -508,13 +519,13 @@ def create_server(service: VehicleService, *, as_of: datetime) -> MCPServer:
         def reset_simulator() -> schemas.ResetSimulatorOutput:
             schemas.ResetSimulatorInput.model_validate({})
             cleared = fault_capability.reset_simulator()
-            representative = service.list_vehicles(as_of=as_of, limit=1)[0]
+            representative = service.list_vehicles(as_of=current_time(), limit=1)[0]
             return schemas.ResetSimulatorOutput(
                 reset=True,
                 cleared_faults=cleared,
                 data_quality=_quality_output(
                     representative.data_quality,
-                    as_of=as_of,
+                    as_of=current_time(),
                     start=representative.points[0].device_time,
                     end=representative.latest.device_time,
                 ),

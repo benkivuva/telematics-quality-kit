@@ -1,7 +1,8 @@
 """Simulator-backed fleet, with all points admitted through the GT06 parser."""
 
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from typing import Literal
 
 from telematics.clock import Clock
@@ -14,6 +15,16 @@ from telematics.models.telemetry import TelemetryPoint
 from telematics.simulator.generator import Simulator
 from telematics.simulator.profiles import VehicleProfile
 from telematics.store.memory import MemoryPointStore
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveFault:
+    """One simulator-only fault and its optional simulated-time expiry."""
+
+    vehicle_id: str
+    name: str
+    params: Mapping[str, int | float | str]
+    expires_at: datetime | None
 
 
 class SimulatorBackend:
@@ -32,6 +43,7 @@ class SimulatorBackend:
         self._clock = clock
         self.event_tap = event_tap if event_tap is not None else EventTap()
         simulator = Simulator(seed=seed, clock=clock, profile_mix=profile_mix)
+        self._simulator = simulator
         fleet = simulator.vehicles(vehicles=vehicles)
         profile_by_vehicle = {vehicle.vehicle_id: vehicle.profile for vehicle in fleet}
         self._profiles = profile_by_vehicle
@@ -41,13 +53,20 @@ class SimulatorBackend:
             for protocol, codec in codecs.items()
         }
         frames = simulator.frames(vehicles=vehicles)
+        self._base_frames = list(frames)
         self._frames = dict(frames)
         self._protocol_by_vehicle = {
             vehicle_id: profile_by_vehicle[vehicle_id].protocol for vehicle_id, _ in frames
         }
         self._codecs = codecs
-        self._active_faults: dict[str, tuple[str, str, Mapping[str, int | float | str]]] = {}
+        self._active_faults: dict[str, ActiveFault] = {}
         self._next_fault_id = 1
+        self._tick_index = 0
+        initial_time = clock.now()
+        self._next_tick = {
+            vehicle_id: initial_time + timedelta(seconds=profile.report_interval_seconds)
+            for vehicle_id, profile in profile_by_vehicle.items()
+        }
         for vehicle_id, frame in frames:
             profile = profile_by_vehicle[vehicle_id]
             pipelines[profile.protocol].ingest(vehicle_id, frame)
@@ -58,6 +77,47 @@ class SimulatorBackend:
 
     def get_points(self, vehicle_id: str) -> tuple[TelemetryPoint, ...]:
         return tuple(self._store.points(vehicle_id))
+
+    def advance(self, duration: timedelta) -> datetime:
+        """Advance simulated time and ingest deterministic profile-cadence frames."""
+        if duration <= timedelta(0):
+            raise ValueError("simulator advance duration must be positive")
+        advance_clock = getattr(self._clock, "advance", None)
+        if not callable(advance_clock):
+            raise TypeError("simulator backend requires an advanceable clock")
+        end_time = self._clock.now() + duration
+        pipelines = {
+            name: IngestPipeline(codec, self._store, clock=self._clock, event_tap=self.event_tap)
+            for name, codec in self._codecs.items()
+        }
+        while self._next_tick and min(self._next_tick.values()) <= end_time:
+            tick_at = min(self._next_tick.values())
+            advance_clock(tick_at - self._clock.now())
+            if self._expire_faults():
+                pipelines = self._pipelines()
+            self._tick_index += 1
+            frames_at = dict(
+                self._simulator.frames_at(
+                    vehicles=len(self._vehicle_ids), at=tick_at, tick_index=self._tick_index
+                )
+            )
+            due = [vehicle for vehicle, next_at in self._next_tick.items() if next_at == tick_at]
+            for vehicle_id in due:
+                self._next_tick[vehicle_id] += timedelta(
+                    seconds=self._profiles[vehicle_id].report_interval_seconds
+                )
+                frame = frames_at[vehicle_id]
+                if any(
+                    active.vehicle_id == vehicle_id and active.name == "rural_blackout"
+                    for active in self._active_faults.values()
+                ):
+                    continue
+                self._base_frames.append((vehicle_id, frame))
+                self._frames[vehicle_id] = frame
+                self._ingest_faulted(pipelines, vehicle_id, frame)
+        advance_clock(end_time - self._clock.now())
+        self._expire_faults()
+        return end_time
 
     def get_profile(self, vehicle_id: str) -> VehicleProfile:
         return self._profiles[vehicle_id]
@@ -84,9 +144,16 @@ class SimulatorBackend:
         """Apply a reversible simulator fault before frames enter their parser."""
         if vehicle_id not in self._frames:
             raise ValueError(f"unknown simulator vehicle {vehicle_id}")
+        self._severity_multiplier(params)
+        expires_at = None
+        duration_value = params.get("duration")
+        if duration_value is not None:
+            if not isinstance(duration_value, str):
+                raise ValueError("fault duration must be an integer followed by s, m, or h")
+            expires_at = self._clock.now() + self._parse_duration(duration_value)
         fault_id = f"fault-{self._next_fault_id:04d}"
         self._next_fault_id += 1
-        self._active_faults[fault_id] = (vehicle_id, fault, dict(params))
+        self._active_faults[fault_id] = ActiveFault(vehicle_id, fault, dict(params), expires_at)
         self._rebuild_store()
         impact = {
             "stale_device": "freshness degrades",
@@ -107,38 +174,106 @@ class SimulatorBackend:
         self._rebuild_store()
         return cleared
 
+    def _expire_faults(self) -> bool:
+        """Remove faults whose injected-clock duration has elapsed."""
+        now = self._clock.now()
+        expired = [
+            fault_id
+            for fault_id, active in self._active_faults.items()
+            if active.expires_at is not None and active.expires_at <= now
+        ]
+        if expired:
+            for fault_id in expired:
+                del self._active_faults[fault_id]
+            self._rebuild_store()
+        return bool(expired)
+
+    def _pipelines(self) -> dict[str, IngestPipeline]:
+        """Create protocol pipelines targeting the current memory store."""
+        return {
+            name: IngestPipeline(codec, self._store, clock=self._clock, event_tap=self.event_tap)
+            for name, codec in self._codecs.items()
+        }
+
+    @staticmethod
+    def _parse_duration(value: str) -> timedelta:
+        """Parse a positive simulated duration ending in s, m, or h."""
+        if len(value) < 2 or not value[:-1].isdigit() or int(value[:-1]) <= 0:
+            raise ValueError("fault duration must be a positive integer followed by s, m, or h")
+        multiplier = {"s": 1, "m": 60, "h": 3600}.get(value[-1])
+        if multiplier is None:
+            raise ValueError("fault duration must end in s, m, or h")
+        return timedelta(seconds=int(value[:-1]) * multiplier)
+
     def _rebuild_store(self) -> None:
         self._store = MemoryPointStore()
         pipelines = {
             name: IngestPipeline(codec, self._store, clock=self._clock, event_tap=self.event_tap)
             for name, codec in self._codecs.items()
         }
-        active_by_vehicle: dict[str, list[str]] = {}
-        for vehicle_id, fault, _params in self._active_faults.values():
-            active_by_vehicle.setdefault(vehicle_id, []).append(fault)
-        for vehicle_id, frame in self._frames.items():
-            protocol = self._protocol_by_vehicle[vehicle_id]
-            codec = self._codecs[protocol]
-            points = codec.decode(frame)
-            for fault in active_by_vehicle.get(vehicle_id, []):
-                points = [self._apply_fault(point, fault) for point in points]
-                if fault == "duplicate_heartbeats":
-                    points = [*points, *points]
-                elif fault == "buffered_burst":
-                    points.reverse()
-            for point in points:
-                pipelines[protocol].ingest(vehicle_id, codec.encode((point,)))
+        active_by_vehicle: dict[str, list[tuple[str, Mapping[str, int | float | str]]]] = {}
+        for active in self._active_faults.values():
+            active_by_vehicle.setdefault(active.vehicle_id, []).append((active.name, active.params))
+        for vehicle_id, frame in self._base_frames:
+            self._ingest_faulted(
+                pipelines,
+                vehicle_id,
+                frame,
+                [
+                    (fault, params)
+                    for fault, params in active_by_vehicle.get(vehicle_id, [])
+                    if fault != "rural_blackout"
+                ],
+            )
+
+    def _ingest_faulted(
+        self,
+        pipelines: Mapping[str, IngestPipeline],
+        vehicle_id: str,
+        frame: bytes,
+        faults: list[tuple[str, Mapping[str, int | float | str]]] | None = None,
+    ) -> None:
+        protocol = self._protocol_by_vehicle[vehicle_id]
+        codec = self._codecs[protocol]
+        points = codec.decode(frame)
+        for fault, params in faults if faults is not None else self._faults_for(vehicle_id):
+            points = [self._apply_fault(point, fault, params) for point in points]
+            if fault == "duplicate_heartbeats":
+                repeats = round(2 * self._severity_multiplier(params))
+                points = [*points, *(points * repeats)]
+            elif fault == "buffered_burst":
+                points.reverse()
+        for point in points:
+            pipelines[protocol].ingest(vehicle_id, codec.encode((point,)))
+
+    def _faults_for(self, vehicle_id: str) -> list[tuple[str, Mapping[str, int | float | str]]]:
+        return [
+            (active.name, active.params)
+            for active in self._active_faults.values()
+            if active.vehicle_id == vehicle_id
+        ]
 
     @staticmethod
-    def _apply_fault(point: TelemetryPoint, fault: str) -> TelemetryPoint:
-        if fault in {"stale_device", "rural_blackout", "clock_skew"}:
-            from datetime import timedelta
-
-            return replace(point, device_time=point.device_time - timedelta(minutes=10))
+    def _apply_fault(
+        point: TelemetryPoint, fault: str, params: Mapping[str, int | float | str]
+    ) -> TelemetryPoint:
+        multiplier = SimulatorBackend._severity_multiplier(params)
+        if fault in {"stale_device", "clock_skew"}:
+            duration = timedelta(minutes=10 * multiplier)
+            return replace(point, device_time=point.device_time - duration)
         if fault == "gps_drift":
-            return replace(point, latitude=min(89.9, point.latitude + 0.1))
+            return replace(point, latitude=min(89.9, point.latitude + 0.1 * multiplier))
         if fault == "ignition_flicker":
             return replace(point, ignition_on=not bool(point.ignition_on))
         if fault == "fuel_sensor_spike":
             return replace(point, fuel_level_percent=100.0)
         return point
+
+    @staticmethod
+    def _severity_multiplier(params: Mapping[str, int | float | str]) -> float:
+        # Phase 5 severity deliberately scales the fault's default magnitude/duration.
+        severity = params.get("severity", "medium")
+        multipliers = {"low": 0.5, "medium": 1.0, "high": 2.0}
+        if not isinstance(severity, str) or severity not in multipliers:
+            raise ValueError("severity must be low, medium, or high")
+        return multipliers[severity]
