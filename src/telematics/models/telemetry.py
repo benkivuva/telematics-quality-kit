@@ -17,3 +17,5 @@ class TelemetryPoint:
     serial_number: int
     received_at: datetime | None = None
     out_of_order: bool = False
+    ignition_on: bool | None = None
+    fuel_level_percent: float | None = None
