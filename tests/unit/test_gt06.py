@@ -45,6 +45,13 @@ def test_gt06_login_rejects_malformed_frame_with_parse_error(frame: bytes) -> No
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("frame", [b"\x78\x78\x1f\x12", b"\x00\x00\x1f\x12" + bytes(32)])
+def test_gt06_location_rejects_short_or_bad_start_frame(frame: bytes) -> None:
+    with pytest.raises(ParseError):
+        GT06Codec().decode(frame)
+
+
+@pytest.mark.unit
 def test_gt06_login_rejects_bad_crc_with_parse_error() -> None:
     frame = bytearray(read_hex_fixture("gt06_login.hex"))
     frame[14] ^= 0x01
