@@ -31,10 +31,18 @@ jobs:
         run: semgrep scan --config auto --error
       - name: pip-audit
         run: uv run pip-audit
+      - name: Install Trivy
+        run: |
+          TRIVY_VERSION=0.68.2
+          curl --fail --location --retry 3 --retry-delay 5 \
+            --output trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl --fail --location --retry 3 --retry-delay 5 \
+            --output trivy_checksums.txt \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_checksums.txt"
+          grep "trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" trivy_checksums.txt | sha256sum --check --
+          mkdir -p .trivy
+          tar -xzf trivy.tar.gz -C .trivy trivy
+          echo "$GITHUB_WORKSPACE/.trivy" >> "$GITHUB_PATH"
       - name: trivy filesystem scan
-        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # 0.28.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          severity: CRITICAL,HIGH
-          exit-code: "1"
+        run: trivy fs --severity CRITICAL,HIGH --exit-code 1 .
