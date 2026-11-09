@@ -15,3 +15,5 @@ class TelemetryPoint:
     course_deg: int
     satellites: int
     serial_number: int
+    received_at: datetime | None = None
+    out_of_order: bool = False
