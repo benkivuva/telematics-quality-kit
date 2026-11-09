@@ -3,7 +3,9 @@
 from collections.abc import Mapping
 
 from telematics.clock import Clock
+from telematics.codecs.base import Codec
 from telematics.codecs.gt06 import GT06Codec
+from telematics.codecs.teltonika import TeltonikaCodec
 from telematics.ingest.pipeline import IngestPipeline
 from telematics.ingest.tap import EventTap
 from telematics.models.telemetry import TelemetryPoint
@@ -12,7 +14,7 @@ from telematics.store.memory import MemoryPointStore
 
 
 class SimulatorBackend:
-    """In-memory fleet backend initialized from deterministic wire frames."""
+    """In-memory fleet backend initialized through each profile's wire codec."""
 
     def __init__(
         self,
@@ -25,12 +27,18 @@ class SimulatorBackend:
     ) -> None:
         self._store = MemoryPointStore()
         self.event_tap = event_tap if event_tap is not None else EventTap()
-        pipeline = IngestPipeline(GT06Codec(), self._store, clock=clock, event_tap=self.event_tap)
-        frames = Simulator(seed=seed, clock=clock, profile_mix=profile_mix).frames(
-            vehicles=vehicles
-        )
+        simulator = Simulator(seed=seed, clock=clock, profile_mix=profile_mix)
+        fleet = simulator.vehicles(vehicles=vehicles)
+        profile_by_vehicle = {vehicle.vehicle_id: vehicle.profile for vehicle in fleet}
+        codecs: dict[str, Codec] = {"gt06": GT06Codec(), "teltonika": TeltonikaCodec()}
+        pipelines = {
+            protocol: IngestPipeline(codec, self._store, clock=clock, event_tap=self.event_tap)
+            for protocol, codec in codecs.items()
+        }
+        frames = simulator.frames(vehicles=vehicles)
         for vehicle_id, frame in frames:
-            pipeline.ingest(vehicle_id, frame)
+            profile = profile_by_vehicle[vehicle_id]
+            pipelines[profile.protocol].ingest(vehicle_id, frame)
         self._vehicle_ids = tuple(vehicle_id for vehicle_id, _ in frames)
 
     def list_vehicle_ids(self) -> tuple[str, ...]:

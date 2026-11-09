@@ -7,6 +7,7 @@ import pytest
 from telematics.backends.simulator import SimulatorBackend
 from telematics.clock import ManualClock
 from telematics.codecs.gt06 import GT06Codec
+from telematics.codecs.teltonika import TeltonikaCodec
 from telematics.ingest.events import Decoded, FrameReceived, Stored
 from telematics.ingest.tap import EventTap
 from telematics.simulator.generator import Simulator
@@ -36,24 +37,31 @@ def test_scaled_fleet_ids_and_imes_are_unique_and_repeatable(vehicles: int) -> N
 
 
 @pytest.mark.unit
-def test_simulator_backend_sends_synthetic_frames_through_gt06_decoder(
+def test_simulator_backend_routes_frames_through_the_profile_codec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    decoded_frames: list[bytes] = []
-    decode = GT06Codec.decode
+    decoded_by_codec: dict[str, list[bytes]] = {"gt06": [], "teltonika": []}
+    gt06_decode = GT06Codec.decode
+    teltonika_decode = TeltonikaCodec.decode
 
-    def record_decode(codec: GT06Codec, frame: bytes):
-        decoded_frames.append(frame)
-        return decode(codec, frame)
+    def record_gt06_decode(codec: GT06Codec, frame: bytes):
+        decoded_by_codec["gt06"].append(frame)
+        return gt06_decode(codec, frame)
 
-    monkeypatch.setattr(GT06Codec, "decode", record_decode)
+    def record_teltonika_decode(codec: TeltonikaCodec, frame: bytes):
+        decoded_by_codec["teltonika"].append(frame)
+        return teltonika_decode(codec, frame)
+
+    monkeypatch.setattr(GT06Codec, "decode", record_gt06_decode)
+    monkeypatch.setattr(TeltonikaCodec, "decode", record_teltonika_decode)
     now = datetime(2024, 4, 5, 6, 7, 8, tzinfo=UTC)
     tap = EventTap()
     events = tap.subscribe(maxsize=64)
 
     backend = SimulatorBackend(seed=42, clock=ManualClock(now), vehicles=12, event_tap=tap)
 
-    assert len(decoded_frames) == 12
+    assert len(decoded_by_codec["teltonika"]) == 9
+    assert len(decoded_by_codec["gt06"]) == 3
     assert len(backend.list_vehicle_ids()) == 12
     assert all(backend.get_points(vehicle_id) for vehicle_id in backend.list_vehicle_ids())
     published = tuple(events.get_nowait() for _ in range(36))
@@ -74,5 +82,6 @@ def test_generated_frames_respect_each_profile_speed_limit() -> None:
     frames = dict(simulator.frames(vehicles=4))
 
     for vehicle in fleet:
-        decoded = GT06Codec().decode(frames[vehicle.vehicle_id])[0]
+        codec = GT06Codec() if vehicle.profile.protocol == "gt06" else TeltonikaCodec()
+        decoded = codec.decode(frames[vehicle.vehicle_id])[0]
         assert decoded.speed_kph <= vehicle.profile.max_speed_kph

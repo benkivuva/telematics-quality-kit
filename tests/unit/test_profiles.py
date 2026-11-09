@@ -11,8 +11,8 @@ def test_profile_defaults_match_the_approved_heuristics() -> None:
         code: (profile.max_speed_kph, profile.report_interval_seconds, profile.protocol)
         for code, profile in PROFILES.items()
     } == {
-        "trk": (90, 30, "gt06"),
-        "lry": (60, 60, "gt06"),
+        "trk": (90, 30, "teltonika"),
+        "lry": (60, 60, "teltonika"),
         "car": (70, 20, "gt06"),
         "pik": (80, 45, "gt06"),
     }
