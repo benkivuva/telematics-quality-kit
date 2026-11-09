@@ -1,0 +1,4 @@
+# Source: Teltonika Telematics Wiki, Codec, public Codec 8 example copied in ARCHITECTURE.md §7.1.
+# CRC input: bytes [8:62] of the complete frame (54 bytes, Codec ID 0x08 through second record count).
+# CRC-16/IBM result: 0xC7CF; CRC-16/X25 over the same bytes: 0x5DAF.
+000000000000003608010000016B40D8EA30010000000000000000000000000000000105021503010101425E0F01F10000601A014E0000000000000000010000C7CF
