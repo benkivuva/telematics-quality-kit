@@ -34,15 +34,15 @@ jobs:
       - name: Install Trivy
         run: |
           TRIVY_VERSION=0.69.3
-          curl --fail --location --retry 3 --retry-delay 5 \
-            --output trivy.tar.gz \
-            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          ARCHIVE="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          BASE="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          curl --fail --location --retry 3 --retry-delay 5 --output "$ARCHIVE" "$BASE/$ARCHIVE"
           curl --fail --location --retry 3 --retry-delay 5 \
             --output trivy_checksums.txt \
-            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_checksums.txt"
-          grep "trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" trivy_checksums.txt | sha256sum --check --
+            "$BASE/trivy_${TRIVY_VERSION}_checksums.txt"
+          grep -F " $ARCHIVE" trivy_checksums.txt | sha256sum --check --strict -
           mkdir -p .trivy
-          tar -xzf trivy.tar.gz -C .trivy trivy
+          tar -xzf "$ARCHIVE" -C .trivy trivy
           echo "$GITHUB_WORKSPACE/.trivy" >> "$GITHUB_PATH"
       - name: trivy filesystem scan
         run: trivy fs --severity CRITICAL,HIGH --exit-code 1 .
