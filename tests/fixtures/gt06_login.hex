@@ -1,0 +1,5 @@
+# Source: ARCHITECTURE.md §7.1; GT06 GPS Tracker Communication Protocol v1.8.1
+# https://www.traccar.org/protocol/5023-gt06/GT06_GPS_Tracker_Communication_Protocol_v1.8.1.pdf
+# Published example for IMEI 123456789012345; CRC-16/X25 is 0x8CDD.
+# CRC independently checked with a standalone bitwise reference (poly 0x8408, init/xorout 0xFFFF).
+78 78 0D 01 01 23 45 67 89 01 23 45 00 01 8C DD 0D 0A

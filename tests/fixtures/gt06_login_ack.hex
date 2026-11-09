@@ -1,0 +1,4 @@
+# Source: ARCHITECTURE.md §7.1; same GT06 protocol document as gt06_login.hex.
+# Published ACK example; CRC-16/X25 over 05 01 00 01 is 0xD9DC.
+# CRC independently checked with a standalone bitwise reference (poly 0x8408, init/xorout 0xFFFF).
+78 78 05 01 00 01 D9 DC 0D 0A
