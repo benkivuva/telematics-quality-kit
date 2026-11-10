@@ -2,6 +2,7 @@
 
 import cmd
 import json
+import math
 import shlex
 import sys
 from collections import Counter
@@ -39,7 +40,7 @@ def _duration(value: str) -> timedelta:
 class Shell(cmd.Cmd):
     """One command dispatcher shared by interactive and scripted sessions."""
 
-    intro = "Telematics quality shell. Type help for commands."
+    intro = "Synthetic fleet ready. Start with `fleet` or type `help` to see commands."
     prompt = "telematics> "
 
     def __init__(
@@ -60,11 +61,25 @@ class Shell(cmd.Cmd):
     def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
         try:
             result = self.session.call_tool(name, arguments)
-        except (RuntimeError, ValueError) as exc:
-            self._write(f"error: {exc}")
+        except (
+            ConnectionError,
+            OSError,
+            RuntimeError,
+            TimeoutError,
+            ValueError,
+            TypeError,
+            KeyError,
+            ExceptionGroup,
+        ) as exc:
+            self._fail(str(exc))
             return None
         self.last_result = result
         return result
+
+    def _fail(self, message: str) -> None:
+        self.failed = True
+        self.failure_message = message
+        self._write(f"error: {message}")
 
     def _write(self, value: str) -> None:
         self.stdout.write(value + "\n")
@@ -123,7 +138,7 @@ class Shell(cmd.Cmd):
             limit = int(tokens[tokens.index("--limit") + 1]) if "--limit" in tokens else 50
             result = self._call("list_vehicles", {"limit": limit})
         except (ValueError, IndexError) as exc:
-            self._write(f"usage: ls [--limit 1..200] ({exc})")
+            self._fail(f"usage: ls [--limit 1..200] ({exc})")
             return
         if result is None:
             return
@@ -142,7 +157,7 @@ class Shell(cmd.Cmd):
         try:
             (vehicle_id,) = shlex.split(argument)
         except ValueError:
-            self._write("usage: get VEHICLE_ID")
+            self._fail("usage: get VEHICLE_ID")
             return
         result = self._call("get_quality_report", {"vehicle_id": vehicle_id, "verbose": True})
         if result is None:
@@ -170,9 +185,19 @@ class Shell(cmd.Cmd):
         try:
             tokens = shlex.split(argument)
         except ValueError as exc:
-            self._write(f"usage: report [VEHICLE_ID] [--verbose] ({exc})")
+            self._fail(f"usage: report [VEHICLE_ID] [--verbose] ({exc})")
             return
-        vehicle_id = next((token for token in tokens if not token.startswith("--")), None)
+        vehicle_ids = [token for token in tokens if not token.startswith("--")]
+        unknown_options = [
+            token for token in tokens if token.startswith("--") and token != "--verbose"
+        ]
+        if unknown_options:
+            self._fail(f"unknown option: {unknown_options[0]}")
+            return
+        if len(vehicle_ids) > 1 or tokens.count("--verbose") > 1:
+            self._fail("usage: report [VEHICLE_ID] [--verbose]")
+            return
+        vehicle_id = vehicle_ids[0] if vehicle_ids else None
         result = self._call(
             "get_quality_report",
             {"vehicle_id": vehicle_id, "verbose": "--verbose" in tokens},
@@ -185,7 +210,7 @@ class Shell(cmd.Cmd):
         try:
             vehicle_id, check_name = shlex.split(argument)
         except ValueError:
-            self._write("usage: explain VEHICLE_ID CHECK")
+            self._fail("usage: explain VEHICLE_ID CHECK")
             return
         result = self._call("get_quality_report", {"vehicle_id": vehicle_id, "verbose": True})
         if result is None:
@@ -193,12 +218,12 @@ class Shell(cmd.Cmd):
         vehicles = result.get("vehicles")
         vehicle = vehicles[0] if vehicles else result
         if not vehicle.get("data_quality"):
-            self._write(f"vehicle not found: {vehicle_id}")
+            self._fail(f"vehicle not found: {vehicle_id}")
             return
         checks = vehicle["data_quality"]["checks"]
         check = next((item for item in checks if item["name"] == check_name), None)
         if check is None:
-            self._write(f"unknown check: {check_name}")
+            self._fail(f"unknown check: {check_name}")
             return
         self._write(
             f"{check_name} {check['verdict']} · score {check['score']:.2f} · "
@@ -209,14 +234,14 @@ class Shell(cmd.Cmd):
         """Call any public MCP tool: call TOOL [JSON_ARGUMENTS]."""
         name, separator, raw = argument.partition(" ")
         if not name:
-            self._write("usage: call TOOL [JSON_ARGUMENTS]")
+            self._fail("usage: call TOOL [JSON_ARGUMENTS]")
             return
         try:
             values = json.loads(raw) if separator and raw.strip() else {}
             if not isinstance(values, dict):
                 raise TypeError("tool arguments must be a JSON object")
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
-            self._write(f"invalid JSON arguments: {exc}")
+            self._fail(f"invalid JSON arguments: {exc}")
             return
         result = self._call(name, values)
         if result is not None:
@@ -226,8 +251,16 @@ class Shell(cmd.Cmd):
         """List tools exposed by the active MCP server."""
         try:
             tools = self.session.list_tools()
-        except (RuntimeError, ValueError) as exc:
-            self._write(f"error: {exc}")
+        except (
+            ConnectionError,
+            OSError,
+            RuntimeError,
+            TimeoutError,
+            ValueError,
+            TypeError,
+            ExceptionGroup,
+        ) as exc:
+            self._fail(str(exc))
             return
         for tool in tools:
             self._write(f"{tool['name']} — {tool['description']}")
@@ -248,7 +281,7 @@ class Shell(cmd.Cmd):
                 "inject_fault", {"vehicle_id": vehicle_id, "fault": fault, "params": params}
             )
         except (ValueError, IndexError) as exc:
-            self._write(
+            self._fail(
                 "usage: inject FAULT VEHICLE_ID [--severity low|medium|high] "
                 f"[--duration 15m] ({exc})"
             )
@@ -273,7 +306,7 @@ class Shell(cmd.Cmd):
             else:
                 fault = _ALIASES.get(requested_fault, requested_fault)
         except ValueError as exc:
-            self._write(f"usage: clear [FAULT|all] [VEHICLE_ID] ({exc})")
+            self._fail(f"usage: clear [FAULT|all] [VEHICLE_ID] ({exc})")
             return
         active = (
             [
@@ -314,7 +347,7 @@ class Shell(cmd.Cmd):
             if not active:
                 self._write("no active faults")
         else:
-            self._write("active fault listing is available only in embedded mode")
+            self._fail("active fault listing is available only in embedded mode")
 
     def do_advance(self, argument: str) -> None:
         """Advance embedded simulated time: advance 6m."""
@@ -322,9 +355,70 @@ class Shell(cmd.Cmd):
             duration = _duration(argument.strip())
             at = self.session.advance(duration)
         except (ValueError, RuntimeError, TypeError) as exc:
-            self._write(f"error: {exc}")
+            self._fail(str(exc))
             return
         self._write(f"sim time {format_sim_time(at)}")
+
+    def do_pause(self, _argument: str) -> None:
+        """Pause automatic simulator time in embedded mode."""
+        if not isinstance(self.session, EmbeddedSession):
+            self._fail("pause is available only in embedded mode")
+            return
+        self.session.clock_driver.pause()
+        self._write("simulator paused; advance still moves time explicitly")
+
+    def do_resume(self, _argument: str) -> None:
+        """Resume automatic simulator time in embedded mode."""
+        if not isinstance(self.session, EmbeddedSession):
+            self._fail("resume is available only in embedded mode")
+            return
+        self.session.clock_driver.resume()
+        self._write("simulator resumed")
+
+    def do_speed(self, argument: str) -> None:
+        """Show or set simulator speed, for example ``speed 10x``."""
+        if not isinstance(self.session, EmbeddedSession):
+            self._fail("speed is available only in embedded mode")
+            return
+        value = argument.strip()
+        if not value:
+            self._write(f"simulator speed {self.session.clock_driver.speed:g}x")
+            return
+        raw = value[:-1] if value.lower().endswith("x") else value
+        try:
+            speed = float(raw)
+        except ValueError:
+            self._fail("usage: speed Nx (N must be a positive finite number)")
+            return
+        if not math.isfinite(speed) or speed <= 0:
+            self._fail("usage: speed Nx (N must be a positive finite number)")
+            return
+        self.session.clock_driver.set_speed(speed)
+        self._write(f"simulator speed {speed:g}x")
+
+    def do_reset(self, _argument: str) -> None:
+        """Clear active faults and restore seeded frames."""
+        if not isinstance(self.session, EmbeddedSession):
+            self._fail("reset is available only in embedded mode")
+            return
+        result = self._call("reset_simulator", {})
+        if result is not None:
+            self._write(
+                f"simulator reset; cleared {result['cleared_faults']} faults; seed {self.session.seed}"
+            )
+
+    def do_seed(self, argument: str) -> None:
+        """Rebuild the embedded fleet from a new integer seed."""
+        if not isinstance(self.session, EmbeddedSession):
+            self._fail("seed is available only in embedded mode")
+            return
+        try:
+            seed = int(argument.strip())
+        except ValueError:
+            self._fail("usage: seed INTEGER")
+            return
+        self.session.reseed(seed)
+        self._write(f"simulator reseeded with seed {seed}")
 
     def do_expect(self, argument: str) -> None:
         """Assert a verdict or field: expect verdict ID BLOCK | expect field ID PATH VALUE."""

@@ -33,5 +33,15 @@ def test_speed_driver_rejects_nonpositive_speed() -> None:
     start = datetime(2025, 1, 1, tzinfo=UTC)
     backend = SimulatorBackend(seed=42, clock=ManualClock(start), vehicles=1)
 
-    with pytest.raises(ValueError, match="speed must be positive"):
+    with pytest.raises(ValueError, match="speed must be a positive finite number"):
         SimulatorClockDriver(backend, speed=0)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("speed", [float("nan"), float("inf")])
+def test_speed_driver_rejects_nonfinite_speed(speed: float) -> None:
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    backend = SimulatorBackend(seed=42, clock=ManualClock(start), vehicles=1)
+
+    with pytest.raises(ValueError, match="positive finite"):
+        SimulatorClockDriver(backend, speed=speed)

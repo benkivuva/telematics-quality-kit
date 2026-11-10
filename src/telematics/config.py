@@ -1,5 +1,8 @@
 """Configurable heuristic defaults for quality evaluation."""
 
+import math
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
@@ -27,6 +30,46 @@ class DriftConfig:
     warn_fraction: float = 0.01
     block_fraction: float = 0.05
     stationary_jitter_meters: float = 25.0
+
+    def __post_init__(self) -> None:
+        values = (self.warn_fraction, self.block_fraction, self.stationary_jitter_meters)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("drift thresholds must be finite numbers")
+        if self.warn_fraction <= 0 or self.block_fraction <= self.warn_fraction:
+            raise ValueError("drift block fraction must be greater than a positive warn fraction")
+        if self.stationary_jitter_meters <= 0:
+            raise ValueError("stationary jitter threshold must be positive")
+
+
+def drift_config_from_environment(
+    environment: Mapping[str, str] | None = None,
+) -> DriftConfig:
+    """Build drift thresholds from documented TELEMATICS_* environment variables."""
+    values = environment if environment is not None else os.environ
+    defaults = DriftConfig()
+    names = {
+        "TELEMATICS_DRIFT_WARN_FRACTION": "warn_fraction",
+        "TELEMATICS_DRIFT_BLOCK_FRACTION": "block_fraction",
+        "TELEMATICS_DRIFT_STATIONARY_JITTER_METERS": "stationary_jitter_meters",
+    }
+    parsed: dict[str, float] = {}
+    for variable, field in names.items():
+        if variable not in values:
+            continue
+        try:
+            parsed[field] = float(values[variable])
+        except ValueError as exc:
+            raise ValueError(f"{variable} must be a number") from exc
+    try:
+        return DriftConfig(
+            warn_fraction=parsed.get("warn_fraction", defaults.warn_fraction),
+            block_fraction=parsed.get("block_fraction", defaults.block_fraction),
+            stationary_jitter_meters=parsed.get(
+                "stationary_jitter_meters", defaults.stationary_jitter_meters
+            ),
+        )
+    except ValueError as exc:
+        raise ValueError(f"invalid drift threshold configuration: {exc}") from exc
 
 
 @dataclass(frozen=True, slots=True)

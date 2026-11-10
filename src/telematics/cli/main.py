@@ -19,7 +19,7 @@ from telematics.cli.shell import Shell, execute_command, run_script
 from telematics.cli.stream import add_stream_parser
 from telematics.cli.stream import stream as run_stream
 from telematics.clock import ManualClock
-from telematics.config import FreshnessConfig
+from telematics.config import DriftConfig, FreshnessConfig, drift_config_from_environment
 from telematics.mcp.server import create_server
 from telematics.report.builder import (
     FaultSpec,
@@ -34,17 +34,21 @@ from telematics.simulator.realtime import SimulatorClockDriver
 _SIMULATION_START = datetime(2024, 4, 5, 6, 7, 8, tzinfo=UTC)
 
 
-def _demo(*, vehicles: int, seed: int) -> int:
+def _demo(*, vehicles: int, seed: int, drift_config: DriftConfig) -> int:
     """Print deterministic before/after output for a stale-device exercise."""
     as_of = datetime(2024, 4, 5, 6, 7, 8, tzinfo=UTC)
     config = FreshnessConfig()
     baseline_service = VehicleService(
-        SimulatorBackend(seed=seed, clock=ManualClock(as_of), vehicles=vehicles), config
+        SimulatorBackend(seed=seed, clock=ManualClock(as_of), vehicles=vehicles),
+        config,
+        drift_config=drift_config,
     )
     baseline = baseline_service.list_vehicles(as_of=as_of)
     stale_time = as_of - timedelta(seconds=61)
     stale_service = VehicleService(
-        SimulatorBackend(seed=seed, clock=ManualClock(stale_time), vehicles=vehicles), config
+        SimulatorBackend(seed=seed, clock=ManualClock(stale_time), vehicles=vehicles),
+        config,
+        drift_config=drift_config,
     )
     after = stale_service.list_vehicles(as_of=as_of)
     print("Phase 2 telematics demo — baseline")
@@ -130,7 +134,7 @@ def _positive_detail(value: str) -> int:
     return detail
 
 
-def _report(args: argparse.Namespace) -> int:
+def _report(args: argparse.Namespace, *, drift_config: DriftConfig) -> int:
     try:
         scenario = load_scenario_file(args.scenario) if args.scenario else None
         if args.clean and args.inject:
@@ -189,6 +193,7 @@ def _report(args: argparse.Namespace) -> int:
             detail=args.detail,
             profile_mix=profile_mix,
             command=" ".join(command_parts),
+            drift_config=drift_config,
         )
     except (OSError, TypeError, ValueError) as exc:
         print(f"invalid report inputs: {exc}", file=sys.stderr)
@@ -222,6 +227,7 @@ def _shell(
     attach: str | None,
     command: str | None,
     script: str | None,
+    drift_config: DriftConfig,
 ) -> int:
     session: EmbeddedSession | AttachedSession
     if attach is None:
@@ -230,6 +236,7 @@ def _shell(
             seed=seed,
             start=_SIMULATION_START,
             profile_mix=dict(profile_mix) if profile_mix is not None else None,
+            drift_config=drift_config,
         )
         session.advance(timedelta(minutes=10))
     else:
@@ -244,7 +251,27 @@ def _shell(
             print(f"cannot read script {script}: {exc}", file=sys.stderr)
             return 4
         return run_script(shell, contents)
-    shell.cmdloop()
+    if isinstance(session, EmbeddedSession):
+        stop = Event()
+        clock_thread = Thread(
+            target=session.clock_driver.run,
+            args=(stop,),
+            daemon=True,
+        )
+        clock_thread.start()
+        try:
+            try:
+                shell.cmdloop()
+            except KeyboardInterrupt:
+                print("\nInterrupted; exiting shell.")
+        finally:
+            stop.set()
+            clock_thread.join()
+    else:
+        try:
+            shell.cmdloop()
+        except KeyboardInterrupt:
+            print("\nInterrupted; exiting shell.")
     return 0
 
 
@@ -256,6 +283,7 @@ def _serve(
     transport: str,
     host: str,
     port: int,
+    drift_config: DriftConfig,
     speed: float = 1.0,
 ) -> int:
     """Run the embedded simulated fleet over the selected MCP transport."""
@@ -266,7 +294,7 @@ def _serve(
         vehicles=vehicles,
         profile_mix=profile_mix,
     )
-    service = VehicleService(backend, FreshnessConfig())
+    service = VehicleService(backend, FreshnessConfig(), drift_config=drift_config)
     server = create_server(service, as_of=clock.now(), clock=clock)
     stop = Event()
     driver = SimulatorClockDriver(backend, speed=speed)
@@ -338,9 +366,17 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--out", default="fleet-report.html")
     report.add_argument("--open", action="store_true")
     args = parser.parse_args(argv)
+    drift_config: DriftConfig | None = None
+    if args.command in {"demo", "serve", "shell", "stream", "report"}:
+        try:
+            drift_config = drift_config_from_environment()
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.command == "demo":
-        return _demo(vehicles=args.vehicles, seed=args.seed)
+        assert drift_config is not None
+        return _demo(vehicles=args.vehicles, seed=args.seed, drift_config=drift_config)
     if args.command == "serve":
+        assert drift_config is not None
         return _serve(
             vehicles=args.vehicles,
             seed=args.seed,
@@ -349,8 +385,10 @@ def main(argv: list[str] | None = None) -> int:
             host=args.host,
             port=args.port,
             speed=args.speed,
+            drift_config=drift_config,
         )
     if args.command == "shell":
+        assert drift_config is not None
         return _shell(
             vehicles=args.vehicles,
             seed=args.seed,
@@ -358,6 +396,7 @@ def main(argv: list[str] | None = None) -> int:
             attach=args.attach,
             command=args.shell_command,
             script=args.script,
+            drift_config=drift_config,
         )
     if args.command == "inject":
         return inject_and_wait(
@@ -370,6 +409,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout_seconds=args.wait,
         )
     if args.command == "stream":
+        assert drift_config is not None
         if args.rate < 1:
             parser.error("stream rate must be positive")
         return run_stream(
@@ -381,11 +421,13 @@ def main(argv: list[str] | None = None) -> int:
             issues_only=args.issues_only,
             show_hex=args.hex,
             as_json=args.json,
+            drift_config=drift_config,
         )
     if args.command == "init":
         return init_command(args.template, args.path)
     if args.command == "doctor":
         return run_doctor()
     if args.command == "report":
-        return _report(args)
+        assert drift_config is not None
+        return _report(args, drift_config=drift_config)
     return 0

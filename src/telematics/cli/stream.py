@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from telematics.backends.simulator import SimulatorBackend
 from telematics.clock import ManualClock
-from telematics.config import FreshnessConfig
+from telematics.config import DriftConfig, FreshnessConfig
 from telematics.ingest.events import (
     ChecksEvaluated,
     Decoded,
@@ -236,6 +236,7 @@ def stream(
     issues_only: bool = False,
     show_hex: bool = False,
     as_json: bool = False,
+    drift_config: DriftConfig | None = None,
 ) -> int:
     """Run the embedded simulator and continuously display tapped events."""
     start = datetime(2024, 4, 5, 6, 7, 8, tzinfo=UTC)
@@ -243,7 +244,7 @@ def stream(
     tap = EventTap()
     subscription = tap.subscribe(maxsize=256)
     backend = SimulatorBackend(seed=seed, clock=clock, vehicles=vehicles, event_tap=tap)
-    service = VehicleService(backend, FreshnessConfig())
+    service = VehicleService(backend, FreshnessConfig(), drift_config=drift_config)
     sampler = EventSampler(rate=rate)
     previous: dict[str, Verdict] = {}
     try:

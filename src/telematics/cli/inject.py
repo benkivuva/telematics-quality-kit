@@ -4,7 +4,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from telematics.cli.session import AttachedSession
+from telematics.cli.session import AttachedSession, MCPToolError
 
 ToolCall = Callable[[str, dict[str, Any]], dict[str, Any]]
 Monotonic = Callable[[], float]
@@ -80,6 +80,9 @@ def inject_and_wait(
             "inject_fault",
             {"vehicle_id": vehicle_id, "fault": fault, "params": params},
         )
+    except MCPToolError as exc:
+        print(f"simulator rejected the request: {exc}")
+        return 2
     except (OSError, RuntimeError, TimeoutError, ExceptionGroup) as exc:
         print(
             f"cannot reach simulator at {session.url}: {_root_exception_message(exc)}\n"
@@ -102,6 +105,9 @@ def inject_and_wait(
             monotonic=monotonic,
             sleep=sleep,
         )
+    except MCPToolError as exc:
+        print(f"simulator rejected the quality request: {exc}")
+        return 2
     except (OSError, RuntimeError, TimeoutError, ExceptionGroup) as exc:
         print(
             f"cannot reach simulator at {session.url}: {_root_exception_message(exc)}\n"

@@ -14,22 +14,46 @@ from mcp.types import TextContent
 
 from telematics.backends.simulator import SimulatorBackend
 from telematics.clock import ManualClock
-from telematics.config import FreshnessConfig
+from telematics.config import DriftConfig, FreshnessConfig
 from telematics.mcp.server import create_server
 from telematics.service.vehicles import VehicleService
+from telematics.simulator.realtime import SimulatorClockDriver
 
 ToolCall = Callable[[str, dict[str, Any]], dict[str, Any]]
+
+
+class MCPToolError(RuntimeError):
+    """A connected MCP server rejected a tool request."""
+
+
+def _root_exception_message(error: BaseException) -> str:
+    while isinstance(error, BaseExceptionGroup) and error.exceptions:
+        error = error.exceptions[0]
+    return str(error)
 
 
 class EmbeddedSession:
     """A deterministic simulator session using the public in-process MCP tools."""
 
     def __init__(
-        self, backend: SimulatorBackend, clock: ManualClock, service: VehicleService
+        self,
+        backend: SimulatorBackend,
+        clock: ManualClock,
+        service: VehicleService,
+        *,
+        vehicles: int,
+        seed: int,
+        profile_mix: dict[str, int] | None,
+        drift_config: DriftConfig,
     ) -> None:
         self.backend = backend
         self.clock = clock
         self.service = service
+        self.vehicles = vehicles
+        self.seed = seed
+        self.profile_mix = profile_mix
+        self.drift_config = drift_config
+        self.clock_driver = SimulatorClockDriver(backend, speed=1.0)
         self.server = create_server(service, as_of=clock.now(), clock=clock)
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -44,6 +68,21 @@ class EmbeddedSession:
         """Advance the shared simulated clock and emit cadence frames."""
         return self.backend.advance(duration)
 
+    def reseed(self, seed: int) -> None:
+        """Rebuild the embedded fleet from a new seed at the current sim time."""
+        backend = SimulatorBackend(
+            seed=seed,
+            clock=self.clock,
+            vehicles=self.vehicles,
+            profile_mix=self.profile_mix,
+        )
+        service = VehicleService(backend, FreshnessConfig(), drift_config=self.drift_config)
+        self.backend = backend
+        self.service = service
+        self.seed = seed
+        self.server = create_server(service, as_of=self.clock.now(), clock=self.clock)
+        self.clock_driver.set_backend(backend)
+
 
 class AttachedSession:
     """A CLI session that can call only the public tools on a running server."""
@@ -56,11 +95,39 @@ class AttachedSession:
         """Invoke an MCP tool over Streamable HTTP."""
         if self._call_tool_override is not None:
             return self._call_tool_override(name, arguments)
-        return asyncio.run(_call_http_server(self.url, name, arguments))
+        try:
+            return asyncio.run(_call_http_server(self.url, name, arguments))
+        except MCPToolError:
+            raise
+        except (
+            ConnectionError,
+            OSError,
+            RuntimeError,
+            TimeoutError,
+            ValueError,
+            TypeError,
+            ExceptionGroup,
+        ) as exc:
+            raise ConnectionError(
+                f"cannot connect to MCP server at {self.url}: {_root_exception_message(exc)}"
+            ) from None
 
     def list_tools(self) -> list[dict[str, str]]:
         """List tools through the attached server's MCP connection."""
-        return asyncio.run(_list_http_tools(self.url))
+        try:
+            return asyncio.run(_list_http_tools(self.url))
+        except (
+            ConnectionError,
+            OSError,
+            RuntimeError,
+            TimeoutError,
+            ValueError,
+            TypeError,
+            ExceptionGroup,
+        ) as exc:
+            raise ConnectionError(
+                f"cannot connect to MCP server at {self.url}: {_root_exception_message(exc)}"
+            ) from None
 
     def advance(self, _duration: timedelta) -> datetime:
         """Attached sessions cannot control a server's simulated clock."""
@@ -73,6 +140,7 @@ def create_embedded_session(
     seed: int,
     start: datetime,
     profile_mix: dict[str, int] | None = None,
+    drift_config: DriftConfig | None = None,
 ) -> EmbeddedSession:
     """Construct one shared simulator, clock, service, and MCP server."""
     clock = ManualClock(start)
@@ -82,8 +150,17 @@ def create_embedded_session(
         vehicles=vehicles,
         profile_mix=profile_mix,
     )
-    service = VehicleService(backend, FreshnessConfig())
-    return EmbeddedSession(backend, clock, service)
+    selected_drift_config = drift_config or DriftConfig()
+    service = VehicleService(backend, FreshnessConfig(), drift_config=selected_drift_config)
+    return EmbeddedSession(
+        backend,
+        clock,
+        service,
+        vehicles=vehicles,
+        seed=seed,
+        profile_mix=profile_mix,
+        drift_config=selected_drift_config,
+    )
 
 
 async def _call_memory_server(
@@ -104,7 +181,7 @@ async def _call_memory_server(
                 response = await client.call_tool(name, arguments)
             tasks.cancel_scope.cancel()
     if response.is_error:
-        raise RuntimeError(_error_text(response.content))
+        raise MCPToolError(_error_text(response.content))
     if not isinstance(response.structured_content, dict):
         raise TypeError(f"MCP tool {name} returned no structured content")
     return response.structured_content
@@ -136,7 +213,7 @@ async def _call_http_server(url: str, name: str, arguments: dict[str, Any]) -> d
         await client.initialize()
         response = await client.call_tool(name, arguments)
     if response.is_error:
-        raise RuntimeError(_error_text(response.content))
+        raise MCPToolError(_error_text(response.content))
     if not isinstance(response.structured_content, dict):
         raise TypeError(f"MCP tool {name} returned no structured content")
     return response.structured_content

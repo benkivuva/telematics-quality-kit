@@ -8,6 +8,7 @@ This is a developer tool for building and testing telematics data systems. It is
 
 - [What you can do](#what-you-can-do)
 - [Requirements and install](#requirements-and-install)
+- [Configuration](#configuration)
 - [60-second walkthrough](#60-second-walkthrough)
 - [How quality results work](#how-quality-results-work)
 - [Synthetic fleet and protocols](#synthetic-fleet-and-protocols)
@@ -59,11 +60,38 @@ uv run telematics --help
 
 All examples below use `uv run telematics`, which runs the checked-out project in its managed environment. The package also installs `telematics-quality-kit` as an alias for the same CLI. Run `uv run telematics COMMAND --help` for the exact options of any command.
 
-For a no-clone first run with `uv` installed:
+Choose the installation path for how you plan to use the toolkit:
+
+- **Develop from a checkout:** use `uv sync` above; this installs the locked runtime and development dependencies.
+- **Run the demo without a checkout:** after v0.1.0 is published to PyPI, use `uvx telematics-quality-kit demo`. Until then, run `uv run telematics demo` from a checkout.
+- **Install into an existing Python environment:** after v0.1.0 is published, use `python -m pip install telematics-quality-kit`, then run `telematics demo`. The CLI package is not available on PyPI before release.
+- **Run an MCP HTTP server in a container:** use Docker Compose as described under [Run the container](#run-the-container).
+
+After publication, the no-clone command is:
 
 ```bash
 uvx telematics-quality-kit demo
 ```
+
+## Configuration
+
+Drift thresholds are heuristics. The CLI reads these optional environment variables; unset values keep the defaults shown below:
+
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `TELEMATICS_DRIFT_WARN_FRACTION` | `0.01` | Fraction of points that may be flagged before drift becomes WARN. |
+| `TELEMATICS_DRIFT_BLOCK_FRACTION` | `0.05` | Fraction of points that may be flagged before drift becomes BLOCK; must be greater than the WARN fraction. |
+| `TELEMATICS_DRIFT_STATIONARY_JITTER_METERS` | `25` | Stationary movement tolerance in meters. |
+
+Set these in the environment before starting `demo`, `serve`, `shell`, `stream`, or `report`. For example, in PowerShell:
+
+```powershell
+$env:TELEMATICS_DRIFT_WARN_FRACTION = "0.02"
+$env:TELEMATICS_DRIFT_BLOCK_FRACTION = "0.08"
+uv run telematics shell
+```
+
+The same variables can be exported in Bash. Values must be finite numbers, the BLOCK fraction must exceed WARN, and the jitter threshold must be positive.
 
 ## 60-second walkthrough
 
@@ -88,6 +116,8 @@ get TRK-0001
 report TRK-0001 --verbose
 explain TRK-0001 freshness
 ```
+
+The shell starts with an embedded synthetic fleet. Begin with `help` or `fleet`; `help` lists every command available in the current v0.1 shell.
 
 Exercise a fault and advance simulated time without waiting on the wall clock:
 
@@ -252,17 +282,21 @@ Available shell commands:
 | `clear` | Clear simulator faults and restore seeded frames. |
 | `faults` | List active fault IDs in embedded mode. |
 | `advance DURATION` | Advance embedded simulated time by a duration such as `30s`, `6m`, or `1h`. |
+| `pause` / `resume` | Pause or resume automatic simulator time in embedded mode. Explicit `advance` still works while paused. |
+| `speed [Nx]` | Show or set the automatic simulator clock rate, such as `speed 10x`. |
+| `reset` | Clear active simulator faults and restore the seeded frames. |
+| `seed INTEGER` | Rebuild the embedded fleet using a new seed. |
 | `call TOOL [JSON_ARGUMENTS]` | Call a public MCP tool and print its structured response. |
 | `tools` | List tools exposed by the active MCP server. |
 | `expect verdict VEHICLE_ID PASS\|WARN\|BLOCK` | Assert a vehicle verdict in a script or interactive session. |
-| `expect field VEHICLE_ID PATH VALUE` | Assert a field in the location response; `true` and `false` are parsed as booleans. |
+| `expect field VEHICLE_ID PATH VALUE` | Assert a field in the location response, using dotted paths such as `data_quality.usable_for_decision`; `true` and `false` are parsed as booleans. |
 | `exit`, `quit`, `Ctrl-D` | Leave the shell. |
 
 Fault names accept aliases: `stale`, `drift`, `blackout`, `dupes`, `flicker`, `skew`, `fuel-spike`, and `burst`; canonical names are also accepted. Severity scales the fault's default magnitude or duration: low `0.5x`, medium `1.0x`, high `2.0x`.
 
-`advance` is available only for embedded sessions. An attached session talks only to the server's public MCP tools. Tab completion depends on platform readline support and is not available on every Windows Python installation.
+`advance`, `pause`, `resume`, `speed`, `reset`, and `seed` are available only for embedded sessions. An attached session talks only to the server's public MCP tools. The `events` shell command is planned for v0.2 and is not available in v0.1. Tab completion depends on platform readline support and is not available on every Windows Python installation.
 
-Script files are plain text, one shell command per line; blank lines and `#` comments are ignored. Failed `expect` commands stop the script with exit code 1:
+Script files are plain text, one shell command per line; blank lines and `#` comments are ignored. Any command error or failed `expect` stops the script with exit code 1:
 
 ```bash
 uv run telematics init script blackout-drill.tqs
@@ -274,7 +308,7 @@ Edit the file to contain, for example:
 inject blackout TRK-0001 --duration 20m
 advance 6m
 expect verdict TRK-0001 BLOCK
-expect field TRK-0001 usable_for_decision false
+expect field TRK-0001 data_quality.usable_for_decision false
 ```
 
 Then run it:
@@ -417,7 +451,7 @@ Options:
 - `--out FILE`: output path; default `fleet-report.html`.
 - `--open`: open the resulting file in the default browser.
 
-The report includes a synthetic-data notice, scenario and seed, simulated range in East Africa Time, injected faults, fleet score and verdict counts, a worst-first vehicle table, per-check metrics and caveats for detailed vehicles, freshness timelines, and local SVG tracks. A BLOCKed vehicle's location track is withheld when the quality rules prohibit presenting it as decision-ready. HTML strings are escaped. The document contains inline CSS and SVG, a restrictive CSP meta tag, no JavaScript, no external fonts or requests, and a black-and-white-friendly print stylesheet. Reports larger than 5 MB produce a warning suggesting a lower `--detail` value.
+The report writes to `--out` and silently replaces an existing file at that path. Choose a new path or back up the existing report if you need to keep it. The report includes a synthetic-data notice, scenario and seed, simulated range in East Africa Time, injected faults, fleet score and verdict counts, a worst-first vehicle table, per-check metrics and caveats for detailed vehicles, freshness timelines, and local SVG tracks. A BLOCKed vehicle's location track is withheld when the quality rules prohibit presenting it as decision-ready. HTML strings are escaped. The document contains inline CSS and SVG, a restrictive CSP meta tag, no JavaScript, no external fonts or requests, and a black-and-white-friendly print stylesheet. Reports larger than 5 MB produce a warning suggesting a lower `--detail` value.
 
 ## MCP tools, resources, and prompts
 
@@ -444,7 +478,7 @@ The server also exposes:
 - Resources: `quality://checks` and `fleet://profiles`.
 - Prompts: `fleet_health_briefing`, `investigate_vehicle`, and `fault_drill`.
 
-For a generic MCP client supporting stdio, configure a server command similar to this, replacing the path with the absolute path to your checkout:
+For an MCP client supporting stdio, configure its server entry with the command below and replace the directory with your checkout's absolute path. A stdio client launches `telematics serve` as a child process, so there is no second terminal to start and keep open. `stdout` is reserved for MCP protocol messages; diagnostics go to `stderr`.
 
 ```json
 {
@@ -465,7 +499,26 @@ For a generic MCP client supporting stdio, configure a server command similar to
 }
 ```
 
-For an HTTP-capable client, run `uv run telematics serve` and connect it to `http://127.0.0.1:8000/mcp`.
+On Windows, use an absolute path and JSON-escape each backslash (or use forward slashes), for example:
+
+```json
+{
+  "mcpServers": {
+    "telematics-quality-kit": {
+      "command": "uv",
+      "args": ["run", "--directory", "C:/Users/you/projects/telematics-quality-kit", "telematics", "serve", "--transport", "stdio"]
+    }
+  }
+}
+```
+
+For an HTTP-capable client, open two terminals. Keep the server running in the first:
+
+```bash
+uv run telematics serve
+```
+
+Configure/connect the client in the second terminal or its settings to `http://127.0.0.1:8000/mcp`. Stop the server with `Ctrl-C` when finished. HTTP clients do not launch the server process for you.
 
 ## Development and verification
 
@@ -478,6 +531,16 @@ docker compose up -d
 ```
 
 Connect an MCP client to `http://127.0.0.1:8000/mcp`. Stop the service with `docker compose down`. The image runs as a non-root user with a read-only root filesystem and dropped capabilities. See [the threat model](docs/threat-model.md) and [privacy notes](docs/privacy.md).
+
+The container filesystem is read-only and Compose does not mount a persistent report directory by default. To create a report inside its temporary `/tmp` filesystem and copy it to the host (PowerShell example):
+
+```powershell
+docker compose run --name tqk-report --no-deps telematics-quality-kit report --out /tmp/report.html
+docker cp tqk-report:/tmp/report.html .\report.html
+docker rm tqk-report
+```
+
+The report disappears with the temporary container unless copied out. A bind mount can also be used, but the host directory must be writable by the container's non-root user; on Windows, Docker Desktop handles the file sharing while Linux hosts may need to adjust directory ownership or permissions.
 
 Install all project and development dependencies:
 

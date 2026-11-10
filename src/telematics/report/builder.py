@@ -11,7 +11,7 @@ import yaml  # type: ignore[import-untyped]
 
 from telematics.backends.simulator import SimulatorBackend
 from telematics.clock import ManualClock
-from telematics.config import FreshnessConfig
+from telematics.config import DriftConfig, FreshnessConfig
 from telematics.models.quality import Verdict
 from telematics.service.vehicles import VehicleService, VehicleSummary
 
@@ -183,6 +183,7 @@ def build_report_data(
     detail: int = 50,
     profile_mix: Mapping[str, int] | None = None,
     command: str | None = None,
+    drift_config: DriftConfig | None = None,
 ) -> ReportData:
     """Generate a deterministic fleet, apply selected faults, and evaluate it."""
     if duration <= timedelta(0):
@@ -226,7 +227,7 @@ def build_report_data(
     if remaining > timedelta(0):
         backend.advance(remaining)
     end = clock.now()
-    service = VehicleService(backend, FreshnessConfig())
+    service = VehicleService(backend, FreshnessConfig(), drift_config=drift_config)
     report_vehicles: list[ReportVehicle] = []
     for identifier in ids:
         summary = service.evaluate_vehicle(identifier, as_of=end)
