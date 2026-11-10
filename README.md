@@ -59,6 +59,12 @@ uv run telematics --help
 
 All examples below use `uv run telematics`, which runs the checked-out project in its managed environment. The package also installs `telematics-quality-kit` as an alias for the same CLI. Run `uv run telematics COMMAND --help` for the exact options of any command.
 
+For a no-clone first run with `uv` installed:
+
+```bash
+uvx telematics-quality-kit demo
+```
+
 ## 60-second walkthrough
 
 Run the deterministic demo:
@@ -462,6 +468,16 @@ For a generic MCP client supporting stdio, configure a server command similar to
 For an HTTP-capable client, run `uv run telematics serve` and connect it to `http://127.0.0.1:8000/mcp`.
 
 ## Development and verification
+
+### Run the container
+
+The published GHCR image runs the Streamable HTTP MCP server. Docker Compose pulls the prebuilt image and publishes it on host loopback only:
+
+```bash
+docker compose up -d
+```
+
+Connect an MCP client to `http://127.0.0.1:8000/mcp`. Stop the service with `docker compose down`. The image runs as a non-root user with a read-only root filesystem and dropped capabilities. See [the threat model](docs/threat-model.md) and [privacy notes](docs/privacy.md).
 
 Install all project and development dependencies:
 

@@ -1,0 +1,13 @@
+services:
+  telematics-quality-kit:
+    image: ghcr.io/benkivuva/telematics-quality-kit:${IMAGE_TAG:-latest}
+    ports:
+      - "127.0.0.1:8000:8000"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
