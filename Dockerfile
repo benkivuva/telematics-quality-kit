@@ -9,7 +9,13 @@ RUN uv build --wheel --out-dir /wheels
 
 FROM python:3.12-slim AS runtime
 ENV VIRTUAL_ENV=/opt/venv PATH="/opt/venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp
-RUN python -m venv /opt/venv && groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home app
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m venv /opt/venv \
+    && groupadd --gid 10001 app \
+    && useradd --uid 10001 --gid app --no-create-home app
 COPY --from=builder /wheels /wheels
 RUN pip install --no-cache-dir /wheels/*.whl && rm -rf /wheels
 WORKDIR /app
