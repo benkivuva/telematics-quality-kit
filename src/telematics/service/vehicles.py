@@ -81,11 +81,17 @@ def _distance_km(points: tuple[TelemetryPoint, ...]) -> float:
 class VehicleService:
     """Read backend telemetry and evaluate its six v0.1 quality checks."""
 
-    def __init__(self, backend: FleetBackend, config: FreshnessConfig) -> None:
+    def __init__(
+        self,
+        backend: FleetBackend,
+        config: FreshnessConfig,
+        *,
+        drift_config: DriftConfig | None = None,
+    ) -> None:
         self._backend = backend
         self._freshness = FreshnessCheck(config)
         self._config = config
-        self._drift = DriftCheck(DriftConfig())
+        self._drift = DriftCheck(drift_config or DriftConfig())
         self._duplicates = DuplicatesCheck(DuplicatesConfig())
         self._ignition = IgnitionCheck(IgnitionConfig())
         self._plausibility = PlausibilityCheck(PlausibilityConfig())

@@ -72,11 +72,121 @@ def test_c_command_runs_once_and_returns_success() -> None:
     assert "TRK-0001" in output.getvalue()
 
 
+def test_shell_intro_tells_new_users_what_to_try_first() -> None:
+    assert "Start with `fleet`" in Shell.intro
+    assert "type `help`" in Shell.intro
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["get FAKE-9999", "call unknown_tool {}", "call list_vehicles nope"],
+)
+def test_c_command_returns_failure_for_command_errors(command: str) -> None:
+    output = StringIO()
+
+    result = execute_command(
+        create_embedded_session(vehicles=1, seed=3, start=_START), command, stdout=output
+    )
+
+    assert result == 1
+    assert "error:" in output.getvalue().lower() or "invalid json" in output.getvalue().lower()
+
+
+def test_report_rejects_unknown_shell_options() -> None:
+    output = StringIO()
+
+    result = execute_command(
+        create_embedded_session(vehicles=1, seed=3, start=_START),
+        "report TRK-0001 --typo",
+        stdout=output,
+    )
+
+    assert result == 1
+    assert "unknown option: --typo" in output.getvalue()
+
+
+def test_attached_tools_connection_failure_is_concise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from telematics.cli import session as session_module
+    from telematics.cli.session import AttachedSession
+
+    session = AttachedSession("http://127.0.0.1:8000/mcp")
+
+    async def unavailable(_url: str) -> list[dict[str, str]]:
+        raise ExceptionGroup("transport failed", [ConnectionError("refused")])
+
+    monkeypatch.setattr(session_module, "_list_http_tools", unavailable)
+    output = StringIO()
+
+    result = execute_command(session, "tools", stdout=output)
+
+    assert result == 1
+    assert "cannot connect to MCP server" in output.getvalue()
+    assert "refused" in output.getvalue()
+    assert "Traceback" not in output.getvalue()
+
+
+def test_advancing_one_hour_replays_cadence_without_fleet_wide_drift() -> None:
+    session = create_embedded_session(vehicles=3, seed=42, start=_START)
+
+    session.advance(timedelta(hours=1))
+    report = session.call_tool("get_quality_report", {"verbose": False})
+
+    assert all(vehicle["data_quality"]["verdict"] == "PASS" for vehicle in report["vehicles"])
+    assert all(
+        len(session.backend.get_points(vehicle["vehicle_id"])) > 1 for vehicle in report["vehicles"]
+    )
+
+
+def test_embedded_clock_control_commands_update_driver_state() -> None:
+    output = StringIO()
+    session = create_embedded_session(vehicles=1, seed=3, start=_START)
+    shell = Shell(session, stdout=output)
+
+    shell.onecmd("pause")
+    assert session.clock_driver.paused
+    shell.onecmd("speed 100x")
+    assert session.clock_driver.speed == 100
+    shell.onecmd("resume")
+    assert not session.clock_driver.paused
+    assert "paused" in output.getvalue().lower()
+    assert "100x" in output.getvalue()
+
+
+def test_reset_clears_faults_and_seed_rebuilds_embedded_fleet() -> None:
+    output = StringIO()
+    session = create_embedded_session(vehicles=1, seed=3, start=_START)
+    shell = Shell(session, stdout=output)
+    shell.onecmd("inject stale_device TRK-0001 --severity high")
+
+    shell.onecmd("reset")
+    assert not session.backend._active_faults
+
+    shell.onecmd("seed 99")
+    assert session.seed == 99
+    assert "seed 99" in output.getvalue().lower()
+
+
 def test_main_dispatches_shell_c_command(capsys: pytest.CaptureFixture[str]) -> None:
     result = cli_main.main(["shell", "--vehicles", "1", "-c", "get TRK-0001"])
 
     assert result == 0
     assert "TRK-0001" in capsys.readouterr().out
+
+
+def test_ctrl_c_exits_interactive_shell_without_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def interrupt(_shell: Shell) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_main.Shell, "cmdloop", interrupt)
+
+    assert cli_main.main(["shell", "--vehicles", "1"]) == 0
+    output = capsys.readouterr().out
+    assert "Interrupted; exiting shell." in output
+    assert "Traceback" not in output
 
 
 def test_interactive_shell_generates_ten_minutes_of_history(
@@ -156,6 +266,7 @@ def test_inject_prints_the_fleet_summary() -> None:
 
     text = output.getvalue()
     assert "expected:" in text
+    assert "drift BLOCK within 2m at high severity" in text
     assert "2 vehicles · fleet trust" in text
 
 

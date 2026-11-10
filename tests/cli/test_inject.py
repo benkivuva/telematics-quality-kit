@@ -6,6 +6,7 @@ import pytest
 
 from telematics.cli import main as cli_main
 from telematics.cli.inject import inject_and_wait, poll_for_verdict
+from telematics.cli.session import MCPToolError
 
 
 class FakeClient:
@@ -124,6 +125,27 @@ def test_inject_handles_nested_http_client_connection_errors(
     output = capsys.readouterr().out
     assert "refused" in output
     assert "Start it with: uv run telematics serve" in output
+
+
+def test_inject_reports_server_validation_errors_as_bad_requests(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client = FakeClient(MCPToolError("fault duration must be a positive integer"))
+
+    status = inject_and_wait(
+        client,
+        fault="blackout",
+        vehicle_id="TRK-0001",
+        severity="medium",
+        duration="tomorrow",
+        expected="BLOCK",
+        timeout_seconds=None,
+    )
+
+    assert status == 2
+    output = capsys.readouterr().out
+    assert "simulator rejected the request" in output
+    assert "cannot reach simulator" not in output
 
 
 def test_inject_without_wait_returns_after_fault_is_accepted(
