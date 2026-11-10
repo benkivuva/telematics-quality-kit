@@ -11,6 +11,7 @@ from threading import Event, Thread
 
 from telematics.backends.simulator import SimulatorBackend
 from telematics.cli.doctor import doctor as run_doctor
+from telematics.cli.formatting import configure_utf8_stdout
 from telematics.cli.init import init_command
 from telematics.cli.inject import inject_and_wait
 from telematics.cli.session import AttachedSession, EmbeddedSession, create_embedded_session
@@ -230,6 +231,7 @@ def _shell(
             start=_SIMULATION_START,
             profile_mix=dict(profile_mix) if profile_mix is not None else None,
         )
+        session.advance(timedelta(minutes=10))
     else:
         session = AttachedSession(attach)
     if command is not None:
@@ -283,6 +285,7 @@ def _serve(
 
 def main(argv: list[str] | None = None) -> int:
     """Parse the supported command and return its process exit code."""
+    configure_utf8_stdout()
     parser = argparse.ArgumentParser(prog="telematics")
     commands = parser.add_subparsers(dest="command", required=True)
     demo = commands.add_parser("demo", help="run the deterministic vertical-slice demo")

@@ -57,7 +57,10 @@ class SimulatorBackend:
             for protocol, codec in codecs.items()
         }
         frames = simulator.frames(vehicles=vehicles)
-        self._base_frames = list(frames)
+        initial_received_at = clock.now()
+        self._base_frames = [
+            (vehicle_id, frame, initial_received_at) for vehicle_id, frame in frames
+        ]
         self._frames = dict(frames)
         self._protocol_by_vehicle = {
             vehicle_id: profile_by_vehicle[vehicle_id].protocol for vehicle_id, _ in frames
@@ -121,7 +124,7 @@ class SimulatorBackend:
                     for active in self._active_faults.values()
                 ):
                     continue
-                self._base_frames.append((vehicle_id, frame))
+                self._base_frames.append((vehicle_id, frame, tick_at))
                 self._frames[vehicle_id] = frame
                 self._ingest_faulted(pipelines, vehicle_id, frame)
         advance_clock(end_time - self._clock.now())
@@ -183,31 +186,36 @@ class SimulatorBackend:
         self._active_faults[fault_id] = ActiveFault(vehicle_id, fault, dict(params), expires_at)
         self._rebuild_store()
         impact = {
-            "stale_device": "freshness degrades",
-            "gps_drift": "drift plausibility degrades",
-            "rural_blackout": "freshness degrades",
-            "duplicate_heartbeats": "duplicate rate increases",
-            "ignition_flicker": "ignition transitions increase",
-            "clock_skew": "plausibility degrades",
-            "fuel_sensor_spike": "fuel sensor quality degrades",
-            "buffered_burst": "duplicate and ordering checks are exercised",
+            "stale_device": "freshness BLOCK at high severity (device time shifted by 20m)",
+            "gps_drift": "drift BLOCK within 2m at high severity (implausible consecutive fixes)",
+            "rural_blackout": "freshness BLOCK after 5m without reports",
+            "duplicate_heartbeats": "duplicates BLOCK when duplicate fraction reaches its threshold",
+            "ignition_flicker": "ignition WARN when repeated transitions exceed its window threshold",
+            "clock_skew": "plausibility BLOCK at high severity (device clock shifted by 20m)",
+            "fuel_sensor_spike": "fuel WARN when the unexplained drop threshold is crossed",
+            "buffered_burst": "duplicates flags repeated records in the buffered burst",
         }[fault]
         self.event_tap.publish(FaultInjected(vehicle_id, fault, impact))
         return fault_id, impact
 
-    def reset_simulator(self) -> int:
-        """Clear simulator faults and restore original encoded frames."""
+    def reset_simulator(self, *, fault: str | None = None, vehicle_id: str | None = None) -> int:
+        """Clear matching simulator faults and restore original encoded frames."""
         with self._lock:
-            return self._reset_simulator()
+            return self._reset_simulator(fault=fault, vehicle_id=vehicle_id)
 
-    def _reset_simulator(self) -> int:
-        active_faults = tuple(self._active_faults.values())
-        cleared = len(active_faults)
-        self._active_faults.clear()
-        for active in active_faults:
+    def _reset_simulator(self, *, fault: str | None = None, vehicle_id: str | None = None) -> int:
+        selected = tuple(
+            (fault_id, active)
+            for fault_id, active in self._active_faults.items()
+            if (fault is None or active.name == fault)
+            and (vehicle_id is None or active.vehicle_id == vehicle_id)
+        )
+        for fault_id, active in selected:
+            del self._active_faults[fault_id]
             self.event_tap.publish(FaultCleared(active.vehicle_id, active.name))
-        self._rebuild_store()
-        return cleared
+        if selected:
+            self._rebuild_store()
+        return len(selected)
 
     def _expire_faults(self) -> bool:
         """Remove faults whose injected-clock duration has elapsed."""
@@ -250,7 +258,7 @@ class SimulatorBackend:
         active_by_vehicle: dict[str, list[tuple[str, Mapping[str, int | float | str]]]] = {}
         for active in self._active_faults.values():
             active_by_vehicle.setdefault(active.vehicle_id, []).append((active.name, active.params))
-        for vehicle_id, frame in self._base_frames:
+        for vehicle_id, frame, received_at in self._base_frames:
             self._ingest_faulted(
                 pipelines,
                 vehicle_id,
@@ -260,6 +268,7 @@ class SimulatorBackend:
                     for fault, params in active_by_vehicle.get(vehicle_id, [])
                     if fault != "rural_blackout"
                 ],
+                received_at=received_at,
             )
 
     def _ingest_faulted(
@@ -268,6 +277,8 @@ class SimulatorBackend:
         vehicle_id: str,
         frame: bytes,
         faults: list[tuple[str, Mapping[str, int | float | str]]] | None = None,
+        *,
+        received_at: datetime | None = None,
     ) -> None:
         protocol = self._protocol_by_vehicle[vehicle_id]
         codec = self._codecs[protocol]
@@ -280,7 +291,7 @@ class SimulatorBackend:
             elif fault == "buffered_burst":
                 points.reverse()
         for point in points:
-            pipelines[protocol].ingest(vehicle_id, codec.encode((point,)))
+            pipelines[protocol].ingest(vehicle_id, codec.encode((point,)), received_at=received_at)
 
     def _faults_for(self, vehicle_id: str) -> list[tuple[str, Mapping[str, int | float | str]]]:
         return [
@@ -298,10 +309,10 @@ class SimulatorBackend:
             duration = timedelta(minutes=10 * multiplier)
             return replace(point, device_time=point.device_time - duration)
         if fault == "gps_drift":
-            # Vary drift by the generated course so consecutive encoded fixes can
-            # produce impossible movement, while remaining deterministic per frame.
-            course_phase = point.course_deg / 360 * tau
-            offset = sin(course_phase) * 0.1 * multiplier
+            # Deterministic per-fix jitter that varies between consecutive fixes,
+            # so the drift check sees impossible movement without teleporting.
+            phase = point.device_time.timestamp() / 47.0 * tau
+            offset = sin(phase) * 0.02 * multiplier
             return replace(point, latitude=min(89.9, max(-89.9, point.latitude + offset)))
         if fault == "ignition_flicker":
             return replace(point, ignition_on=not bool(point.ignition_on))

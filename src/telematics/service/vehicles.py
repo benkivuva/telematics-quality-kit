@@ -18,6 +18,7 @@ from telematics.config import (
 )
 from telematics.models.quality import CheckResult, Verdict
 from telematics.models.telemetry import TelemetryPoint
+from telematics.quality.caveats import caveat_for
 from telematics.quality.drift import DriftCheck
 from telematics.quality.duplicates import DuplicatesCheck
 from telematics.quality.freshness import FreshnessCheck
@@ -38,7 +39,9 @@ class FaultOperations(Protocol):
         self, vehicle_id: str, fault: str, params: Mapping[str, int | float | str]
     ) -> tuple[str, str]: ...
 
-    def reset_simulator(self) -> int: ...
+    def reset_simulator(
+        self, *, fault: str | None = None, vehicle_id: str | None = None
+    ) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,11 +127,7 @@ class VehicleService:
         )
         freshness = checks[0]
         age = int(freshness.metric["age_seconds"])
-        caveats = tuple(
-            f"{check.name} check returned {check.verdict.value}."
-            for check in checks
-            if check.verdict is not Verdict.PASS
-        )
+        caveats = tuple(caveat for check in checks if (caveat := caveat_for(check)) is not None)
         withheld: tuple[str, ...] = (
             ("trip_distance",)
             if verdict is Verdict.BLOCK

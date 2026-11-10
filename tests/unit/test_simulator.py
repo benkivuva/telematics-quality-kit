@@ -8,10 +8,12 @@ from telematics.backends.simulator import SimulatorBackend
 from telematics.clock import ManualClock
 from telematics.codecs.gt06 import GT06Codec
 from telematics.codecs.teltonika import TeltonikaCodec
-from telematics.config import DriftConfig
+from telematics.config import DriftConfig, FreshnessConfig
 from telematics.ingest.events import Decoded, FaultCleared, FaultInjected, FrameReceived, Stored
 from telematics.ingest.tap import EventTap
+from telematics.models.quality import Verdict
 from telematics.quality.drift import DriftCheck
+from telematics.service.vehicles import VehicleService
 from telematics.simulator.generator import Simulator
 
 
@@ -210,3 +212,57 @@ def test_gps_drift_changes_coordinates_through_the_codec_path() -> None:
     )
     quality = DriftCheck(DriftConfig()).evaluate(drifted, max_speed_kph=profile.max_speed_kph)
     assert quality.metric["flagged_points"] > 0
+
+
+@pytest.mark.unit
+def test_advance_one_hour_without_faults_leaves_the_fleet_at_pass() -> None:
+    start = datetime(2024, 4, 5, 6, 7, 8, tzinfo=UTC)
+    clock = ManualClock(start)
+    backend = SimulatorBackend(seed=42, clock=clock, vehicles=12)
+
+    backend.advance(timedelta(hours=1))
+    summaries = VehicleService(backend, FreshnessConfig()).list_vehicles(as_of=clock.now())
+
+    assert len(summaries) == 12
+    assert all(summary.data_quality.verdict is Verdict.PASS for summary in summaries)
+    assert all(summary.data_quality.label == "trust it" for summary in summaries)
+
+
+@pytest.mark.unit
+def test_injecting_after_advance_preserves_original_receive_times() -> None:
+    start = datetime(2024, 4, 5, 6, 7, 8, tzinfo=UTC)
+    clock = ManualClock(start)
+    backend = SimulatorBackend(seed=42, clock=clock, vehicles=3)
+    service = VehicleService(backend, FreshnessConfig())
+
+    backend.advance(timedelta(hours=1))
+    backend.inject_fault("TRK-0001", "gps_drift", {"severity": "high"})
+    summaries = service.list_vehicles(as_of=clock.now())
+    checks = {
+        item.vehicle_id: {check.name: check for check in item.data_quality.checks}
+        for item in summaries
+    }
+
+    assert checks["TRK-0001"]["drift"].verdict is Verdict.BLOCK
+    assert all(
+        checks[item.vehicle_id]["plausibility"].verdict is Verdict.PASS for item in summaries
+    )
+    assert all(
+        item.data_quality.verdict is not Verdict.BLOCK
+        for item in summaries
+        if item.vehicle_id != "TRK-0001"
+    )
+
+
+@pytest.mark.unit
+def test_clearing_one_fault_preserves_other_active_faults() -> None:
+    start = datetime(2024, 4, 5, 6, 7, 8, tzinfo=UTC)
+    backend = SimulatorBackend(seed=42, clock=ManualClock(start), vehicles=2)
+    first_id, _ = backend.inject_fault("TRK-0001", "gps_drift", {"severity": "high"})
+    second_id, _ = backend.inject_fault("LRY-0001", "stale_device", {"severity": "high"})
+
+    cleared = backend.reset_simulator(fault="gps_drift", vehicle_id="TRK-0001")
+
+    assert cleared == 1
+    assert first_id not in backend._active_faults
+    assert second_id in backend._active_faults

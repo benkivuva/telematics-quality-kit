@@ -5,10 +5,10 @@ import json
 import shlex
 import sys
 from collections import Counter
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, TextIO
 
-from telematics.cli.formatting import json_line, render_verdict
+from telematics.cli.formatting import format_sim_time, json_line, render_verdict
 from telematics.cli.session import AttachedSession, EmbeddedSession
 from telematics.models.quality import Verdict
 
@@ -22,6 +22,8 @@ _ALIASES = {
     "fuel-spike": "fuel_sensor_spike",
     "burst": "buffered_burst",
 }
+_FRESHNESS_LABELS = {Verdict.PASS: "Fresh", Verdict.WARN: "Aging", Verdict.BLOCK: "Stale"}
+_CHECK_ORDER = {Verdict.PASS: 0, Verdict.WARN: 1, Verdict.BLOCK: 2}
 
 
 def _duration(value: str) -> timedelta:
@@ -53,6 +55,7 @@ class Shell(cmd.Cmd):
         self.failed = False
         self.failure_message = ""
         self.last_result: dict[str, Any] | None = None
+        self._previous_verdicts: dict[str, str] = {}
 
     def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
         try:
@@ -76,13 +79,42 @@ class Shell(cmd.Cmd):
         result = self._call("get_quality_report", {"verbose": False})
         if result is None:
             return
+        self._print_fleet_summary(result)
+
+    def _print_fleet_summary(self, result: dict[str, Any]) -> None:
+        """Print the one-line fleet summary and watch for a fleet-wide flip."""
         vehicles = result.get("vehicles", [])
         counts = Counter(item["data_quality"]["verdict"] for item in vehicles)
         score = float(result.get("fleet_trust_score", 1.0))
         self._write(
             f"{len(vehicles)} vehicles · fleet trust {score:.2f} · "
             f"PASS {counts['PASS']} WARN {counts['WARN']} BLOCK {counts['BLOCK']}"
+            f"{self._sim_time_suffix(result)}"
         )
+        self._track_fleet_verdicts(vehicles)
+
+    def _sim_time_suffix(self, result: dict[str, Any]) -> str:
+        """Return the fleet's evaluation time in East Africa Time."""
+        vehicles = result.get("vehicles") or []
+        if not vehicles:
+            return ""
+        as_of = vehicles[0].get("data_quality", {}).get("as_of")
+        if not as_of:
+            return ""
+        return f" · sim time {format_sim_time(datetime.fromisoformat(as_of))}"
+
+    def _track_fleet_verdicts(self, vehicles: list[dict[str, Any]]) -> None:
+        """Warn when every listed vehicle flips to BLOCK in one step."""
+        current = {item["vehicle_id"]: item["data_quality"]["verdict"] for item in vehicles}
+        previous = self._previous_verdicts
+        if (
+            current
+            and all(verdict == "BLOCK" for verdict in current.values())
+            and previous
+            and not all(verdict == "BLOCK" for verdict in previous.values())
+        ):
+            self._write("Warning: entire fleet changed verdict together — check the simulator.")
+        self._previous_verdicts = current
 
     def do_ls(self, argument: str) -> None:
         """List vehicles, worst quality first: ls [--limit N]."""
@@ -103,6 +135,7 @@ class Shell(cmd.Cmd):
             self._write(
                 f"{item['vehicle_id']:<12} {render_verdict(verdict)} {quality['trust_score']:.2f}"
             )
+        self._track_fleet_verdicts(vehicles)
 
     def do_get(self, argument: str) -> None:
         """Show one latest location: get VEHICLE_ID."""
@@ -111,14 +144,22 @@ class Shell(cmd.Cmd):
         except ValueError:
             self._write("usage: get VEHICLE_ID")
             return
-        result = self._call("get_vehicle_location", {"vehicle_id": vehicle_id})
+        result = self._call("get_quality_report", {"vehicle_id": vehicle_id, "verbose": True})
         if result is None:
             return
         quality = result["data_quality"]
         verdict = Verdict(quality["verdict"])
+        checks = {check["name"]: check for check in quality["checks"]}
+        freshness = checks.get("freshness")
+        freshness_verdict = Verdict(freshness["verdict"]) if freshness else Verdict.PASS
+        age = int(freshness["metric"]["age_seconds"]) if freshness else 0
+        responsible = max(
+            quality["checks"], key=lambda check: _CHECK_ORDER[Verdict(check["verdict"])]
+        )["name"]
         self._write(
             f"{vehicle_id} {result['latitude']:.5f}, {result['longitude']:.5f} · "
-            f"age {result['age_seconds']}s · {render_verdict(verdict)} · "
+            f"age {age}s ({_FRESHNESS_LABELS[freshness_verdict]}) · "
+            f"{render_verdict(verdict)} ({responsible}) · "
             f"usable_for_decision={quality['usable_for_decision']}"
         )
         for caveat in quality["caveats"]:
@@ -149,11 +190,12 @@ class Shell(cmd.Cmd):
         result = self._call("get_quality_report", {"vehicle_id": vehicle_id, "verbose": True})
         if result is None:
             return
-        vehicles = result.get("vehicles", [])
-        if not vehicles:
+        vehicles = result.get("vehicles")
+        vehicle = vehicles[0] if vehicles else result
+        if not vehicle.get("data_quality"):
             self._write(f"vehicle not found: {vehicle_id}")
             return
-        checks = vehicles[0]["data_quality"]["checks"]
+        checks = vehicle["data_quality"]["checks"]
         check = next((item for item in checks if item["name"] == check_name), None)
         if check is None:
             self._write(f"unknown check: {check_name}")
@@ -214,19 +256,61 @@ class Shell(cmd.Cmd):
         if result is not None:
             self._write(f"{result['fault']} on {vehicle_id} ({severity}) [{result['fault_id']}]")
             self._write(f"expected: {result['expected_quality_impact']}")
+            fleet_result = self._call("get_quality_report", {"verbose": False})
+            if fleet_result is not None:
+                self._print_fleet_summary(fleet_result)
 
-    def do_clear(self, _argument: str) -> None:
-        """Clear simulator faults with the public reset tool."""
-        result = self._call("reset_simulator", {})
-        if result is not None:
-            self._write(f"cleared {result['cleared_faults']} simulator faults")
+    def do_clear(self, argument: str) -> None:
+        """Clear simulator faults: clear [FAULT|all] [VEHICLE_ID]."""
+        try:
+            tokens = shlex.split(argument)
+            if len(tokens) > 2:
+                raise ValueError("too many arguments")
+            requested_fault = tokens[0] if tokens else "all"
+            vehicle_id = tokens[1] if len(tokens) == 2 else None
+            if requested_fault == "all":
+                fault: str | None = None
+            else:
+                fault = _ALIASES.get(requested_fault, requested_fault)
+        except ValueError as exc:
+            self._write(f"usage: clear [FAULT|all] [VEHICLE_ID] ({exc})")
+            return
+        active = (
+            [
+                (fault_id, item)
+                for fault_id, item in self.session.backend._active_faults.items()
+                if (fault is None or item.name == fault)
+                and (vehicle_id is None or item.vehicle_id == vehicle_id)
+            ]
+            if isinstance(self.session, EmbeddedSession)
+            else []
+        )
+        arguments: dict[str, str] = {}
+        if fault is not None:
+            arguments["fault"] = fault
+        if vehicle_id is not None:
+            arguments["vehicle_id"] = vehicle_id
+        result = self._call("reset_simulator", arguments)
+        if result is None:
+            return
+        cleared = result["cleared_faults"]
+        if active:
+            self._write(f"cleared {cleared} simulator faults:")
+            for fault_id, active_fault in active:
+                severity = active_fault.params.get("severity", "medium")
+                self._write(
+                    f"  {fault_id} {active_fault.name} {active_fault.vehicle_id} ({severity})"
+                )
+        else:
+            self._write(f"cleared {cleared} simulator faults")
 
     def do_faults(self, _argument: str) -> None:
         """Show active embedded simulator fault IDs."""
         if isinstance(self.session, EmbeddedSession):
             active = self.session.backend._active_faults
             for fault_id, fault in active.items():
-                self._write(f"{fault_id} {fault.name} {fault.vehicle_id}")
+                severity = fault.params.get("severity", "medium")
+                self._write(f"{fault_id} {fault.name} {fault.vehicle_id} ({severity})")
             if not active:
                 self._write("no active faults")
         else:
@@ -240,7 +324,7 @@ class Shell(cmd.Cmd):
         except (ValueError, RuntimeError, TypeError) as exc:
             self._write(f"error: {exc}")
             return
-        self._write(f"sim time {at.isoformat()}")
+        self._write(f"sim time {format_sim_time(at)}")
 
     def do_expect(self, argument: str) -> None:
         """Assert a verdict or field: expect verdict ID BLOCK | expect field ID PATH VALUE."""

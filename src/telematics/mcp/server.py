@@ -278,7 +278,10 @@ def create_server(
 
     @server.tool(
         name="get_quality_report",
-        description="Explain quality checks and scores; use verbose for per-check details.",
+        description=(
+            "Explain quality checks and scores; pass vehicle_id for that vehicle's report, "
+            "or omit it for the fleet summary. Use verbose for per-check details."
+        ),
         annotations=_READ_ONLY,
         structured_output=True,
     )
@@ -289,7 +292,18 @@ def create_server(
         request = schemas.QualityReportInput.model_validate(
             {"vehicle_id": vehicle_id, "verbose": verbose}
         )
-        ids = (request.vehicle_id,) if request.vehicle_id else service.list_vehicle_ids()
+        if request.vehicle_id is not None:
+            item = _evaluate(service, request.vehicle_id, as_of=current_time())
+            vehicle = _vehicle_output(item, as_of=current_time(), verbose=request.verbose)
+            return schemas.QualityReportOutput(
+                vehicle_id=vehicle.vehicle_id,
+                device_time=vehicle.device_time,
+                latitude=vehicle.latitude,
+                longitude=vehicle.longitude,
+                speed_kph=vehicle.speed_kph,
+                data_quality=vehicle.data_quality,
+            )
+        ids = service.list_vehicle_ids()
         summaries = [_evaluate(service, identifier, as_of=current_time()) for identifier in ids]
         score = (
             sum(item.data_quality.trust_score for item in summaries) / len(summaries)
@@ -297,7 +311,7 @@ def create_server(
             else 1.0
         )
         return schemas.QualityReportOutput(
-            vehicle_id=request.vehicle_id,
+            vehicle_id=None,
             fleet_trust_score=score,
             vehicles=[
                 _vehicle_output(item, as_of=current_time(), verbose=request.verbose)
@@ -516,9 +530,16 @@ def create_server(
             structured_output=True,
         )
         @_structured_errors
-        def reset_simulator() -> schemas.ResetSimulatorOutput:
-            schemas.ResetSimulatorInput.model_validate({})
-            cleared = fault_capability.reset_simulator()
+        def reset_simulator(
+            fault: schemas.FaultName | None = None,
+            vehicle_id: str | None = None,
+        ) -> schemas.ResetSimulatorOutput:
+            request = schemas.ResetSimulatorInput.model_validate(
+                {"fault": fault, "vehicle_id": vehicle_id}
+            )
+            cleared = fault_capability.reset_simulator(
+                fault=request.fault, vehicle_id=request.vehicle_id
+            )
             representative = service.list_vehicles(as_of=current_time(), limit=1)[0]
             return schemas.ResetSimulatorOutput(
                 reset=True,

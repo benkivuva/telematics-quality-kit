@@ -118,6 +118,7 @@ async def _assert_full_surface() -> None:
                     parsed = _TOOL_MODELS[name].model_validate(payload)
                     assert parsed.schema_version == "1.0"
                     if name == "inject_fault":
+                        assert "freshness BLOCK" in payload["expected_quality_impact"]
                         post_fault = await client.call_tool("list_vehicles", {"limit": 1})
                         assert not post_fault.is_error
                         vehicles = schemas.ListVehiclesOutput.model_validate(

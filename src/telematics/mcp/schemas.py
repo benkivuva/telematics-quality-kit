@@ -1,7 +1,7 @@
 """Strict Pydantic schemas for the v0.1 MCP contract."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase
 from pydantic import ConfigDict, Field, model_validator
@@ -132,7 +132,8 @@ class InjectFaultInput(VehicleIdInput):
 
 
 class ResetSimulatorInput(StrictModel):
-    pass
+    fault: FaultName | None = None
+    vehicle_id: str | None = None
 
 
 class ListVehiclesOutput(StrictModel):
@@ -185,10 +186,22 @@ class FuelEventsOutput(StrictModel):
 
 
 class QualityReportOutput(StrictModel):
+    """A fleet summary, or one vehicle's report when a vehicle_id is supplied."""
+
     schema_version: str = "1.0"
-    vehicle_id: str | None
-    fleet_trust_score: float
-    vehicles: list[VehicleOutput]
+    vehicle_id: str | None = None
+    fleet_trust_score: float | None = None
+    vehicles: list[VehicleOutput] | None = None
+    device_time: datetime | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    speed_kph: float | None = None
+    data_quality: DataQualityOutput | None = None
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        """Omit unset fields so a single-vehicle report is not wrapped."""
+        kwargs.setdefault("exclude_none", True)
+        return super().model_dump(**kwargs)
 
 
 class FleetFreshnessVehicleOutput(StrictModel):

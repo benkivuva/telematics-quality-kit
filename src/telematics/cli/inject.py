@@ -21,6 +21,13 @@ _FAULT_ALIASES = {
 }
 
 
+def _root_exception_message(error: BaseException) -> str:
+    """Unwrap transport exception groups to show the actionable network cause."""
+    while isinstance(error, BaseExceptionGroup) and error.exceptions:
+        error = error.exceptions[0]
+    return str(error)
+
+
 def poll_for_verdict(
     call_tool: ToolCall,
     *,
@@ -37,10 +44,11 @@ def poll_for_verdict(
     deadline = monotonic() + timeout_seconds
     while True:
         report = call_tool("get_quality_report", {"vehicle_id": vehicle_id, "verbose": False})
-        vehicles = report.get("vehicles", [])
-        observed = None
+        vehicles = report.get("vehicles")
         if vehicles:
             observed = vehicles[0].get("data_quality", {}).get("verdict")
+        else:
+            observed = report.get("data_quality", {}).get("verdict")
         if observed == expected:
             return 0
         remaining = deadline - monotonic()
@@ -72,9 +80,9 @@ def inject_and_wait(
             "inject_fault",
             {"vehicle_id": vehicle_id, "fault": fault, "params": params},
         )
-    except (OSError, RuntimeError, TimeoutError) as exc:
+    except (OSError, RuntimeError, TimeoutError, ExceptionGroup) as exc:
         print(
-            f"cannot reach simulator at {session.url}: {exc}\n"
+            f"cannot reach simulator at {session.url}: {_root_exception_message(exc)}\n"
             "Start it with: uv run telematics serve --transport streamable-http",
         )
         return 3
@@ -94,9 +102,9 @@ def inject_and_wait(
             monotonic=monotonic,
             sleep=sleep,
         )
-    except (OSError, RuntimeError, TimeoutError) as exc:
+    except (OSError, RuntimeError, TimeoutError, ExceptionGroup) as exc:
         print(
-            f"cannot reach simulator at {session.url}: {exc}\n"
+            f"cannot reach simulator at {session.url}: {_root_exception_message(exc)}\n"
             "Start it with: uv run telematics serve --transport streamable-http",
         )
         return 3

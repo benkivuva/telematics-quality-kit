@@ -2,12 +2,16 @@
 
 import json
 import os
+import sys
 from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from pydantic import BaseModel
 
 from telematics.models.quality import Verdict
+
+_EAT = timezone(timedelta(hours=3))
 
 _LABELS = {
     Verdict.PASS: ("✓", "trust it"),
@@ -28,6 +32,18 @@ def render_verdict(verdict: Verdict, *, color: bool = False) -> str:
     symbol, label = _LABELS[verdict]
     text = f"{symbol} {verdict.value} — {label}"
     return f"{_COLORS[verdict]}{text}{_RESET}" if color else text
+
+
+def format_sim_time(value: datetime) -> str:
+    """Format an instant for display in East Africa Time (UTC+3, no DST)."""
+    return value.astimezone(_EAT).strftime("%H:%M:%S EAT")
+
+
+def configure_utf8_stdout() -> None:
+    """Use UTF-8 for CLI text and JSON, including Windows redirected output."""
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8")
 
 
 def json_line(value: BaseModel | Mapping[str, Any]) -> str:

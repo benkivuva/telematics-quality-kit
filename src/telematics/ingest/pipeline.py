@@ -35,14 +35,20 @@ class IngestPipeline:
         """Event stream for subscribers observing this pipeline."""
         return self._event_tap
 
-    def ingest(self, vehicle_id: str, frame: bytes) -> Sequence[TelemetryPoint]:
+    def ingest(
+        self,
+        vehicle_id: str,
+        frame: bytes,
+        *,
+        received_at: datetime | None = None,
+    ) -> Sequence[TelemetryPoint]:
         self._publish(FrameReceived(vehicle_id, frame))
         try:
             decoded = self._codec.decode(frame)
-            received_at = self._clock.now()
-            if received_at.tzinfo is None or received_at.utcoffset() is None:
+            receive_time = received_at if received_at is not None else self._clock.now()
+            if receive_time.tzinfo is None or receive_time.utcoffset() is None:
                 raise ValueError("server receive time must be timezone-aware")
-            points = self._normalize(vehicle_id, decoded, received_at.astimezone(UTC))
+            points = self._normalize(vehicle_id, decoded, receive_time.astimezone(UTC))
         except ParseError as exc:
             self._publish(ParseFailed(vehicle_id, str(exc)))
             raise

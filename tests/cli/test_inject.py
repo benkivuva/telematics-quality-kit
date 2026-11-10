@@ -105,6 +105,27 @@ def test_inject_returns_unreachable_status_with_actionable_fix(
     )
 
 
+def test_inject_handles_nested_http_client_connection_errors(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client = FakeClient(ExceptionGroup("transport failed", [ConnectionError("refused")]))
+
+    status = inject_and_wait(
+        client,
+        fault="stale_device",
+        vehicle_id="TRK-0001",
+        severity="high",
+        duration=None,
+        expected="BLOCK",
+        timeout_seconds=2,
+    )
+
+    assert status == 3
+    output = capsys.readouterr().out
+    assert "refused" in output
+    assert "Start it with: uv run telematics serve" in output
+
+
 def test_inject_without_wait_returns_after_fault_is_accepted(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

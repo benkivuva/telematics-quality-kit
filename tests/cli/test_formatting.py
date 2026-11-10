@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from telematics.cli.formatting import json_line, render_verdict, use_color
+from telematics.cli.formatting import configure_utf8_stdout, json_line, render_verdict, use_color
 from telematics.models.quality import Verdict
 
 
@@ -43,3 +43,24 @@ def test_json_line_serializes_pydantic_model_as_one_json_object() -> None:
 
     assert json.loads(line) == {"schema_version": "1.0", "vehicles": [], "next_cursor": None}
     assert "\n" not in line
+
+
+@pytest.mark.unit
+def test_configure_utf8_stdout_reconfigures_legacy_windows_encoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class LegacyConsole:
+        encoding = "cp1252"
+
+        def __init__(self) -> None:
+            self.encoding_set: str | None = None
+
+        def reconfigure(self, *, encoding: str) -> None:
+            self.encoding_set = encoding
+
+    console = LegacyConsole()
+    monkeypatch.setattr("telematics.cli.formatting.sys.stdout", console)
+
+    configure_utf8_stdout()
+
+    assert console.encoding_set == "utf-8"
