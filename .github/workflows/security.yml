@@ -51,4 +51,5 @@ jobs:
       - name: Build image for Trivy scan
         run: docker build --tag telematics-quality-kit:security .
       - name: trivy image scan
-        run: trivy image --severity CRITICAL,HIGH --exit-code 1 telematics-quality-kit:security
+        # Keep blocking on fixed high/critical CVEs; do not fail on findings with no vendor patch yet.
+        run: trivy image --ignore-unfixed --severity CRITICAL,HIGH --exit-code 1 telematics-quality-kit:security

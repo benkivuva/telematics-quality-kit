@@ -15,4 +15,4 @@ security:
 	uv run pip-audit
 	trivy fs --severity CRITICAL,HIGH --exit-code 1 .
 	docker build --tag telematics-quality-kit:security .
-	trivy image --severity CRITICAL,HIGH --exit-code 1 telematics-quality-kit:security
+	trivy image --ignore-unfixed --severity CRITICAL,HIGH --exit-code 1 telematics-quality-kit:security
