@@ -5,6 +5,7 @@ RUN python -m pip install --no-cache-dir "uv==${UV_VERSION}"
 WORKDIR /build
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
+RUN uv export --frozen --no-dev --no-emit-project -o /build/requirements.txt
 RUN uv build --wheel --out-dir /wheels
 
 FROM python:3.12-slim AS runtime
@@ -16,8 +17,11 @@ RUN apt-get update \
     && python -m venv /opt/venv \
     && groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --no-create-home app
+COPY --from=builder /build/requirements.txt /tmp/requirements.txt
 COPY --from=builder /wheels /wheels
-RUN pip install --no-cache-dir /wheels/*.whl && rm -rf /wheels
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt \
+    && pip install --no-cache-dir --no-deps /wheels/*.whl \
+    && rm -rf /wheels /tmp/requirements.txt
 WORKDIR /app
 COPY docker/entrypoint.py docker/healthcheck.py /app/
 USER 10001:10001
