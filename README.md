@@ -1,4 +1,4 @@
-# telematics-quality-kit
+﻿# telematics-quality-kit
 
 **A deterministic, synthetic testbed for telematics data quality.** Generate and decode GT06 and Teltonika device frames, exercise a real parser-in-the-loop ingestion path, inject reversible simulator faults, and inspect every result with an explicit trust verdict.
 
@@ -63,8 +63,8 @@ All examples below use `uv run telematics`, which runs the checked-out project i
 Choose the installation path for how you plan to use the toolkit:
 
 - **Develop from a checkout:** use `uv sync` above; this installs the locked runtime and development dependencies.
-- **Run the demo without a checkout:** after v0.1.0 is published to PyPI, use `uvx telematics-quality-kit demo`. Until then, run `uv run telematics demo` from a checkout.
-- **Install into an existing Python environment:** after v0.1.0 is published, use `python -m pip install telematics-quality-kit`, then run `telematics demo`. The CLI package is not available on PyPI before release.
+- **Run the demo without a checkout:** after v0.1.2 is published to PyPI, use `uvx telematics-quality-kit demo`. Until then, run `uv run telematics demo` from a checkout.
+- **Install into an existing Python environment:** after v0.1.2 is published, use `python -m pip install telematics-quality-kit`, then run `telematics demo`. The CLI package is not available on PyPI before release.
 - **Run an MCP HTTP server in a container:** use Docker Compose as described under [Run the container](#run-the-container).
 
 After publication, the no-clone command is:
@@ -165,9 +165,9 @@ The verdict caps are `PASS = 1.0`, `WARN = 0.79`, and `BLOCK = 0.39`. The fleet 
 
 | Verdict | Trust label | Meaning |
 | --- | --- | --- |
-| `PASS` ✓ | **trust it** | Values are usable for decisions under the configured heuristics. |
-| `WARN` ⚠ | **be careful** | Values are returned with caveats. |
-| `BLOCK` ⛔ | **don't trust it** | A BLOCK is a normal result, not a tool error. Last-known location values may still be present and clearly labelled, but `usable_for_decision` is `false`; affected derived values are withheld and listed. |
+| `PASS` âœ“ | **trust it** | Values are usable for decisions under the configured heuristics. |
+| `WARN` âš  | **be careful** | Values are returned with caveats. |
+| `BLOCK` â›” | **don't trust it** | A BLOCK is a normal result, not a tool error. Last-known location values may still be present and clearly labelled, but `usable_for_decision` is `false`; affected derived values are withheld and listed. |
 
 Every quality-bearing result includes a `data_quality` object with a plain-language label, symbol, verdict, score, `usable_for_decision`, caveats, withheld values, and the evaluation window. Detailed per-check metrics are available in verbose quality reports. Verdicts are always conveyed using text and a symbol, not color alone.
 
@@ -232,7 +232,7 @@ Options:
 - `--profile-mix trk=40,lry=30,car=15,pik=15`: profile percentages; values must be positive and sum to 100. Omit a profile to exclude it.
 - `--transport streamable-http|stdio`: transport, default `streamable-http`.
 - `--host HOST`: HTTP bind host, default `127.0.0.1` (loopback).
-- `--port PORT`: HTTP port, default `8000`, valid range 1–65,535.
+- `--port PORT`: HTTP port, default `8000`, valid range 1â€“65,535.
 - `--speed Nx`: simulated clock rate, default `1x`. For example, `60x` advances roughly an hour of simulated time per minute of elapsed time.
 
 Examples:
@@ -621,7 +621,7 @@ tests/
 - **Deterministic time and randomness:** fixed seeds and injected clocks make simulations, tests, and reports repeatable. The long-running `stream` command sleeps to drive a live display; tests do not rely on wall-clock sleeps.
 - **Bounded event consumers:** event tap subscriptions have bounded queues; slow consumers do not block the ingestion pipeline and can miss older queued events.
 - **Heuristic checks:** scores and thresholds describe configurable defaults. They are not a guarantee that a value is correct.
-- **v0.1 scope:** current commands are listed in the [command reference](#command-reference). Features marked v0.2 in `ARCHITECTURE.md`—including a TCP listener, real Traccar backend, capture/replay, dashboard, metrics intervals, and external device simulator—are not available in this release.
+- **v0.1 scope:** current commands are listed in the [command reference](#command-reference). Features marked v0.2 in `ARCHITECTURE.md`â€”including a TCP listener, real Traccar backend, capture/replay, dashboard, metrics intervals, and external device simulatorâ€”are not available in this release.
 
 ## License
 
