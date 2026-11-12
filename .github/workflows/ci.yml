@@ -25,7 +25,9 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy src/telematics
-      - run: uv run pytest --cov=telematics.codecs --cov=telematics.quality --cov=telematics.service --cov=telematics.mcp --cov-fail-under=85
+      - run: uv run pytest --cov=telematics.codecs --cov=telematics.quality --cov=telematics.service --cov=telematics.mcp --cov=telematics.eval --cov-fail-under=85
+      - name: Deterministic eval (no API key)
+        run: uv run telematics eval
       - name: CLI smoke
         run: |
           uv run pytest tests/cli

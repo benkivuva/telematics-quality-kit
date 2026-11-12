@@ -1,0 +1,3 @@
+{"version":2,"width":100,"height":24,"timestamp":1794468401,"env":{"SHELL":"powershell","TERM":"xterm-256color"}}
+[0.0,"o","uv run telematics demo\r\n"]
+[3.969,"o","Phase 2 telematics demo \u2014 baseline\r\nvehicle      verdict  trust score\r\nTRK-0001     PASS     1.00\r\nLRY-0001     PASS     1.00\r\nCAR-0001     PASS     1.00\r\nafter stale-device fault\r\nvehicle      verdict  trust score\r\nTRK-0001     WARN    0.79\r\nLRY-0001     WARN    0.79\r\nCAR-0001     WARN    0.79\r\n"]

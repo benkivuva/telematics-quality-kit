@@ -2,7 +2,7 @@
 
 **A deterministic, synthetic testbed for telematics data quality.** Generate and decode GT06 and Teltonika device frames, exercise a real parser-in-the-loop ingestion path, inject reversible simulator faults, and inspect every result with an explicit trust verdict.
 
-This is a developer tool for building and testing telematics data systems. It is not a fleet management product, does not connect to real vehicles, and does not issue commands to devices. The current implementation is **v0.1** and uses synthetic data only.
+This is a developer tool for building and testing telematics data systems. It is not a fleet management product, does not connect to real vehicles, and does not issue commands to devices. The current release is **v0.1.4** and uses synthetic data only.
 
 ## Contents
 
@@ -10,6 +10,7 @@ This is a developer tool for building and testing telematics data systems. It is
 - [Requirements and install](#requirements-and-install)
 - [Configuration](#configuration)
 - [60-second walkthrough](#60-second-walkthrough)
+- [`eval`](#eval)
 - [How quality results work](#how-quality-results-work)
 - [Synthetic fleet and protocols](#synthetic-fleet-and-protocols)
 - [Command reference](#command-reference)
@@ -43,12 +44,14 @@ This is a developer tool for building and testing telematics data systems. It is
 - [`uv`](https://docs.astral.sh/uv/)
 - Git, if cloning the repository
 
+Check the active interpreter with `uv run python --version`.
+
 Clone the repository and install the project and its development dependencies:
 
 ```bash
 git clone https://github.com/benkivuva/telematics-quality-kit.git
 cd telematics-quality-kit
-uv sync
+uv sync --locked
 ```
 
 Check the local environment and see the available commands:
@@ -62,12 +65,12 @@ All examples below use `uv run telematics`, which runs the checked-out project i
 
 Choose the installation path for how you plan to use the toolkit:
 
-- **Develop from a checkout:** use `uv sync` above; this installs the locked runtime and development dependencies.
-- **Run the demo without a checkout:** after v0.1.2 is published to PyPI, use `uvx telematics-quality-kit demo`. Until then, run `uv run telematics demo` from a checkout.
-- **Install into an existing Python environment:** after v0.1.2 is published, use `python -m pip install telematics-quality-kit`, then run `telematics demo`. The CLI package is not available on PyPI before release.
+- **Develop from a checkout:** use `uv sync --locked` above; this installs the locked runtime and development dependencies.
+- **Run the demo without a checkout:** use `uvx telematics-quality-kit demo` from the published v0.1.4 package.
+- **Install into an existing Python environment:** install the published package with `python -m pip install telematics-quality-kit`, then run `telematics demo`.
 - **Run an MCP HTTP server in a container:** use Docker Compose as described under [Run the container](#run-the-container).
 
-After publication, the no-clone command is:
+The no-clone command is:
 
 ```bash
 uvx telematics-quality-kit demo
@@ -83,6 +86,8 @@ Drift thresholds are heuristics. The CLI reads these optional environment variab
 | `TELEMATICS_DRIFT_BLOCK_FRACTION` | `0.05` | Fraction of points that may be flagged before drift becomes BLOCK; must be greater than the WARN fraction. |
 | `TELEMATICS_DRIFT_STATIONARY_JITTER_METERS` | `25` | Stationary movement tolerance in meters. |
 
+These configured defaults are checked by `uv run pytest tests/unit/test_config.py`.
+
 Set these in the environment before starting `demo`, `serve`, `shell`, `stream`, or `report`. For example, in PowerShell:
 
 ```powershell
@@ -95,11 +100,20 @@ The same variables can be exported in Bash. Values must be finite numbers, the B
 
 ## 60-second walkthrough
 
+Watch the [short terminal recording](docs/demo.cast) with an asciinema-compatible
+player. The same result can be produced locally with the command below.
+
 Run the deterministic demo:
 
 ```bash
 uv run telematics demo
 ```
+
+Three prompts to try with an MCP client:
+
+1. “Give me a health briefing of the fleet. Which vehicles can I trust right now?”
+2. “Simulate a rural blackout on TRK-0001, then tell me where that vehicle is.”
+3. “Show last week's trips for LRY-0003 and tell me what you could not verify.”
 
 Open the embedded shell and inspect the simulated fleet:
 
@@ -163,6 +177,8 @@ The v0.1 vehicle trust score is the weighted mean of check scores, capped by the
 
 The verdict caps are `PASS = 1.0`, `WARN = 0.79`, and `BLOCK = 0.39`. The fleet score is the mean of vehicle scores; the accompanying verdict counts keep a high fleet average from hiding individual problems.
 
+The score weights and caps are asserted by `uv run pytest tests/unit/test_scoring.py`.
+
 | Verdict | Trust label | Meaning |
 | --- | --- | --- |
 | `PASS` âœ“ | **trust it** | Values are usable for decisions under the configured heuristics. |
@@ -184,6 +200,8 @@ The default profile mix is `trk=40,lry=30,car=30`. Profiles are allocated determ
 | `car` | Ride-hail / PSV car | 70 km/h | 20 s | GT06 |
 | `pik` | Mixed pickup | 80 km/h | 45 s | GT06 |
 
+Fleet bounds, seed behavior, profile assignments, speeds, and report intervals are covered by `uv run pytest tests/unit/test_simulator.py tests/unit/test_profiles.py tests/cli/test_demo.py`.
+
 Set a specific mix with comma-separated percentages that sum to 100:
 
 ```bash
@@ -198,10 +216,39 @@ The simulator derives its per-vehicle and per-tick pseudo-random state from the 
 The installed command is `telematics`. Its current v0.1 subcommands are:
 
 ```text
-demo  serve  shell  inject  stream  init  doctor  report
+demo  serve  shell  inject  stream  init  doctor  report  eval
 ```
 
 Use `uv run telematics --help` or `uv run telematics COMMAND --help` for up-to-date usage. The architecture document also describes future v0.2 commands; they are not part of the current CLI.
+
+The installed package version is `0.1.4`; read it with `uv run python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])"`.
+
+### `eval`
+
+Run the deterministic stale-device, GPS-drift, and rural-blackout contract checks
+without a network connection or API key:
+
+```bash
+uv run telematics eval
+```
+
+The optional model layer compares the same fixed synthetic scenarios with the
+quality block on and off. It uses Gemini and writes dated model evidence to
+`docs/eval-results.md`; set `GEMINI_API_KEY` or `GOOGLE_API_KEY` before opting in:
+
+```bash
+uv run telematics eval --model gemini-1.5-flash --date YYYY-MM-DD
+```
+
+To generate the API-key-free evidence page, supply the date of that run:
+
+```bash
+uv run telematics eval --date YYYY-MM-DD --out docs/eval-results.md
+```
+
+The fixed seed defaults to `42`. To select another seed or output path, use
+`--seed` and `--out`. The deterministic layer is part of CI; the model layer is
+a manual step and is never run by CI.
 
 ### `demo`
 
@@ -453,9 +500,11 @@ Options:
 
 The report writes to `--out` and silently replaces an existing file at that path. Choose a new path or back up the existing report if you need to keep it. The report includes a synthetic-data notice, scenario and seed, simulated range in East Africa Time, injected faults, fleet score and verdict counts, a worst-first vehicle table, per-check metrics and caveats for detailed vehicles, freshness timelines, and local SVG tracks. A BLOCKed vehicle's location track is withheld when the quality rules prohibit presenting it as decision-ready. HTML strings are escaped. The document contains inline CSS and SVG, a restrictive CSP meta tag, no JavaScript, no external fonts or requests, and a black-and-white-friendly print stylesheet. Reports larger than 5 MB produce a warning suggesting a lower `--detail` value.
 
+The report size warning and deterministic output checks are exercised by `uv run pytest tests/cli/test_report.py`.
+
 ## MCP tools, resources, and prompts
 
-`telematics serve` exposes 11 v0.1 tools over either stdio or Streamable HTTP. `inject_fault` and `reset_simulator` are registered only when the active backend exposes the simulator fault capability; they are not general device-control commands.
+`telematics serve` exposes 11 v0.1 tools over either stdio or Streamable HTTP. `inject_fault` and `reset_simulator` are registered only when the active backend exposes the simulator fault capability; they are not general device-control commands. The tool count and schemas are checked by `uv run pytest tests/integration/test_mcp_surface.py`.
 
 | Tool | Purpose |
 | --- | --- |
@@ -521,6 +570,20 @@ uv run telematics serve
 Configure/connect the client in the second terminal or its settings to `http://127.0.0.1:8000/mcp`. Stop the server with `Ctrl-C` when finished. HTTP clients do not launch the server process for you.
 
 ## Development and verification
+
+Numeric defaults and limits shown in this README have executable checks:
+
+| Values | Verification command |
+| --- | --- |
+| Drift defaults | `uv run pytest tests/unit/test_config.py` |
+| Quality weights and verdict caps | `uv run pytest tests/unit/test_scoring.py` |
+| Fleet bounds, seeds, profiles, speeds, and report intervals | `uv run pytest tests/unit/test_simulator.py tests/unit/test_profiles.py tests/cli/test_demo.py` |
+| CLI option bounds, exit codes, stream rates, and report size limit | `uv run pytest tests/cli` |
+| MCP tool count and output schemas | `uv run pytest tests/integration/test_mcp_surface.py` |
+| Package version | `uv run python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])"` |
+
+The short walkthrough recording is generated from `uv run telematics demo`; it is
+stored as [`docs/demo.cast`](docs/demo.cast).
 
 ### Run the container
 
