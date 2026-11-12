@@ -2,7 +2,6 @@
 
 import re
 from datetime import date
-from io import BytesIO
 
 import pytest
 
@@ -35,21 +34,42 @@ def test_optional_model_layer_requires_a_key_but_deterministic_layer_does_not(mo
         run_model_eval("gemini-1.5-flash", run_date=date(2026, 1, 2))
 
 
-def test_gemini_rest_request_uses_key_header_and_reads_text_response(monkeypatch) -> None:
-    requests = []
+def test_gemini_rest_request_uses_fixed_https_host_and_key_header(monkeypatch) -> None:
+    calls = []
 
-    def fake_urlopen(request, *, timeout):
-        requests.append(request)
-        assert timeout == 45
-        return BytesIO(b'{"candidates":[{"content":{"parts":[{"text":"answer"}]}}]}')
+    class FakeResponse:
+        status = 200
 
-    monkeypatch.setattr(harness, "urlopen", fake_urlopen)
+        def read(self) -> bytes:
+            return b'{"candidates":[{"content":{"parts":[{"text":"answer"}]}}]}'
+
+    class FakeConnection:
+        def __init__(self, host: str, *, timeout: int, context) -> None:
+            calls.append(("connect", host, timeout, context.check_hostname, context.verify_mode))
+
+        def request(self, method: str, path: str, *, body: bytes, headers: dict[str, str]) -> None:
+            calls.append(("request", method, path, body, headers))
+
+        def getresponse(self) -> FakeResponse:
+            return FakeResponse()
+
+        def close(self) -> None:
+            calls.append(("close",))
+
+    monkeypatch.setattr(harness, "HTTPSConnection", FakeConnection)
 
     answer = harness._generate_text("gemini-1.5-flash", "prompt", "secret-test-key")
 
     assert answer == "answer"
-    assert requests[0].get_header("X-goog-api-key") == "secret-test-key"
-    assert "/models/gemini-1.5-flash:generateContent" in requests[0].full_url
+    assert calls[0] == ("connect", "generativelanguage.googleapis.com", 45, True, 2)
+    request = calls[1]
+    assert request[:3] == (
+        "request",
+        "POST",
+        "/v1beta/models/gemini-1.5-flash:generateContent",
+    )
+    assert request[4]["x-goog-api-key"] == "secret-test-key"
+    assert calls[-1] == ("close",)
     assert not grade_answer(
         "TRK-0001 is currently at the reported coordinates.", scenario="stale_device"
     )

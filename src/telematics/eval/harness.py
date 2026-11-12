@@ -8,16 +8,16 @@ The optional model layer sends only synthetic, seeded scenarios to Gemini's
 import json
 import os
 import re
+import ssl
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
+from http.client import HTTPException, HTTPSConnection
 from itertools import pairwise
 from math import asin, cos, radians, sin, sqrt
 from typing import Any
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
 
 from telematics.cli.session import EmbeddedSession, create_embedded_session
 
@@ -215,7 +215,7 @@ def _model_prompt(question: str, scenario: ScenarioEval, *, quality_on: bool) ->
 
 def _generate_text(model: str, prompt: str, api_key: str) -> str:
     """Call Gemini's text generation REST API using its API-key header."""
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{quote(model, safe='')}:generateContent"
+    path = f"/v1beta/models/{quote(model, safe='')}:generateContent"
     payload = {
         "systemInstruction": {
             "parts": [
@@ -228,23 +228,32 @@ def _generate_text(model: str, prompt: str, api_key: str) -> str:
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0, "maxOutputTokens": 180},
     }
-    request = Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
+    # The host is a fixed Google endpoint; Python 3.12 verifies certificates by default.
+    # nosemgrep: python.lang.security.audit.httpsconnection-detected.httpsconnection-detected
+    connection = HTTPSConnection(
+        "generativelanguage.googleapis.com", timeout=45, context=ssl.create_default_context()
     )
     try:
-        with urlopen(request, timeout=45) as response:
-            body = json.loads(response.read())
-    except HTTPError as exc:
-        raise RuntimeError(f"model API returned HTTP {exc.code}") from None
-    except (URLError, TimeoutError, OSError) as exc:
+        connection.request(
+            "POST",
+            path,
+            body=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        )
+        response = connection.getresponse()
+        if response.status >= 400:
+            raise RuntimeError(f"model API returned HTTP {response.status}")
+        body = json.loads(response.read())
+    except (HTTPException, TimeoutError, OSError) as exc:
         raise RuntimeError(f"model API request failed: {type(exc).__name__}") from None
+    except json.JSONDecodeError:
+        raise RuntimeError("model API returned invalid JSON") from None
     try:
         return "".join(part["text"] for part in body["candidates"][0]["content"]["parts"])
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError("model API returned no text candidate") from exc
+    finally:
+        connection.close()
 
 
 def run_model_eval(
