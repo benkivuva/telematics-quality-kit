@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0
+## 0.1.4
 
 Initial v0.1 release of the deterministic telematics data-quality testbed.
 
