@@ -21,6 +21,8 @@ class DataQualityOutput(StrictModel):
     usable_for_decision: bool
     caveats: list[str]
     withheld: list[str] = Field(default_factory=list)
+    blocked_vehicles: list[str] = Field(default_factory=list)
+    blocked_vehicle_count: int = Field(default=0, ge=0)
     checks: list["CheckOutput"] = Field(default_factory=list)
     as_of: datetime
     window: "WindowOutput"
@@ -91,6 +93,7 @@ class TripHistoryInput(VehicleIdInput, WindowInput):
 
 class FuelEventsInput(WindowInput):
     vehicle_id: str | None = None
+    limit: int = Field(default=50, ge=1, le=200)
 
 
 class QualityReportInput(StrictModel):
@@ -99,7 +102,8 @@ class QualityReportInput(StrictModel):
 
 
 class FleetFreshnessInput(StrictModel):
-    pass
+    limit: int = Field(default=50, ge=1, le=200)
+    cursor: str | None = None
 
 
 class DriftReportInput(VehicleIdInput, WindowInput):
@@ -112,6 +116,7 @@ class DuplicatesReportInput(WindowInput):
 
 class QualityIssuesInput(StrictModel):
     min_verdict: Literal["WARN", "BLOCK"] = "WARN"
+    limit: int = Field(default=50, ge=1, le=200)
 
 
 FaultName = Literal[
@@ -182,6 +187,8 @@ class FuelEventOutput(StrictModel):
 class FuelEventsOutput(StrictModel):
     schema_version: str = "1.0"
     events: list[FuelEventOutput]
+    total_events: int = Field(default=0, ge=0)
+    truncated: bool = False
     data_quality: DataQualityOutput
 
 
@@ -191,6 +198,9 @@ class QualityReportOutput(StrictModel):
     schema_version: str = "1.0"
     vehicle_id: str | None = None
     fleet_trust_score: float | None = None
+    vehicle_count: int | None = Field(default=None, ge=0)
+    verdict_counts: dict[str, int] | None = None
+    trust_score_histogram: dict[str, int] | None = None
     vehicles: list[VehicleOutput] | None = None
     device_time: datetime | None = None
     latitude: float | None = None
@@ -214,6 +224,8 @@ class FleetFreshnessOutput(StrictModel):
     schema_version: str = "1.0"
     fleet_trust_score: float
     vehicles: list[FleetFreshnessVehicleOutput]
+    vehicle_count: int = Field(default=0, ge=0)
+    next_cursor: str | None = None
     data_quality: DataQualityOutput
 
 
@@ -247,6 +259,8 @@ class QualityIssueOutput(StrictModel):
 class QualityIssuesOutput(StrictModel):
     schema_version: str = "1.0"
     issues: list[QualityIssueOutput]
+    total_issues: int = Field(default=0, ge=0)
+    truncated: bool = False
     data_quality: DataQualityOutput
 
 

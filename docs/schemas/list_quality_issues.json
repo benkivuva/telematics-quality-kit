@@ -57,6 +57,19 @@
           "title": "As Of",
           "type": "string"
         },
+        "blocked_vehicle_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Blocked Vehicle Count",
+          "type": "integer"
+        },
+        "blocked_vehicles": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Blocked Vehicles",
+          "type": "array"
+        },
         "caveats": {
           "items": {
             "type": "string"
@@ -208,6 +221,17 @@
       "default": "1.0",
       "title": "Schema Version",
       "type": "string"
+    },
+    "total_issues": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Total Issues",
+      "type": "integer"
+    },
+    "truncated": {
+      "default": false,
+      "title": "Truncated",
+      "type": "boolean"
     }
   },
   "required": [

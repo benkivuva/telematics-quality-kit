@@ -1,6 +1,7 @@
 """Strict schema and exported-output contract tests."""
 
 import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -28,3 +29,14 @@ def test_each_tool_output_schema_has_schema_version_and_exports(tmp_path) -> Non
         document = json.loads((tmp_path / f"{tool_name}.json").read_text(encoding="utf-8"))
         assert "schema_version" in document["properties"]
         assert document == model.model_json_schema()
+
+
+@pytest.mark.unit
+def test_checked_in_schemas_match_the_output_models() -> None:
+    root = Path(__file__).resolve().parents[2]
+
+    for tool_name, model in TOOL_OUTPUT_MODELS.items():
+        document = json.loads(
+            (root / "docs" / "schemas" / f"{tool_name}.json").read_text(encoding="utf-8")
+        )
+        assert document == model.model_json_schema(), tool_name

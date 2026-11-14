@@ -57,6 +57,19 @@
           "title": "As Of",
           "type": "string"
         },
+        "blocked_vehicle_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Blocked Vehicle Count",
+          "type": "integer"
+        },
+        "blocked_vehicles": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Blocked Vehicles",
+          "type": "array"
+        },
         "caveats": {
           "items": {
             "type": "string"
@@ -192,10 +205,28 @@
       "title": "Fleet Trust Score",
       "type": "number"
     },
+    "next_cursor": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Next Cursor"
+    },
     "schema_version": {
       "default": "1.0",
       "title": "Schema Version",
       "type": "string"
+    },
+    "vehicle_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Vehicle Count",
+      "type": "integer"
     },
     "vehicles": {
       "items": {
