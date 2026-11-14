@@ -10,14 +10,17 @@ from telematics.eval.harness import (
     run_deterministic_eval,
     run_model_eval,
 )
+from telematics.eval.manual import ManualEvalResult, run_manual_eval
 
 __all__ = [
     "QUESTION_SET_SHA256",
     "DeterministicEvalResult",
+    "ManualEvalResult",
     "ModelEvalResult",
     "grade_answer",
     "render_deterministic_results",
     "render_eval_results",
     "run_deterministic_eval",
+    "run_manual_eval",
     "run_model_eval",
 ]

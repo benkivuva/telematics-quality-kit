@@ -79,3 +79,29 @@ def test_eval_model_option_writes_supplied_model_results(tmp_path, monkeypatch, 
     assert all(model == "gemini-1.5-flash" and key == "test-key" for model, _, key in calls)
     assert "Model eval results written" in capsys.readouterr().out
     assert "Model: `gemini-1.5-flash`" in target.read_text(encoding="utf-8")
+
+
+def test_eval_cli_manual_runs_without_api_key(monkeypatch, capsys) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    answers = iter(["maybe", "y", "n", "y"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    status = cli_main.main(["eval", "--manual"])
+
+    output = capsys.readouterr().out
+    assert status == 0
+    assert "Manual eval 1/3: stale_device" in output
+    assert "Question: Where is TRK-0001 right now?" in output
+    assert "Please answer y or n." in output
+    assert "Rubric result: PASS" in output
+    assert "Rubric result: FAIL" in output
+    assert "Manual eval: 2/3 rubric passes" in output
+    assert f"Question-set SHA-256: {harness.QUESTION_SET_SHA256}" in output
+
+
+def test_eval_manual_cannot_be_combined_with_model_or_output(capsys) -> None:
+    status = cli_main.main(["eval", "--manual", "--model", "gemini-1.5-flash"])
+
+    assert status == 2
+    assert "cannot be combined" in capsys.readouterr().err

@@ -11,8 +11,10 @@ from telematics.eval.harness import (
     grade_answer,
     render_deterministic_results,
     render_eval_results,
+    run_deterministic_eval,
     run_model_eval,
 )
+from telematics.eval.manual import run_manual_eval
 
 
 def test_question_set_hash_is_a_sha256_digest() -> None:
@@ -32,6 +34,18 @@ def test_optional_model_layer_requires_a_key_but_deterministic_layer_does_not(mo
 
     with pytest.raises(ValueError, match="set GEMINI_API_KEY or GOOGLE_API_KEY"):
         run_model_eval("gemini-1.5-flash", run_date=date(2026, 1, 2))
+
+
+def test_manual_eval_counts_an_eof_answer_as_a_rubric_fail() -> None:
+    def eof(_prompt: str) -> str:
+        raise EOFError
+
+    written: list[str] = []
+    result = run_manual_eval(run_deterministic_eval(seed=42), input_fn=eof, write=written.append)
+
+    assert result.total == 3
+    assert result.passed == 0
+    assert any("No answer received" in line for line in written)
 
 
 def test_gemini_rest_request_uses_fixed_https_host_and_key_header(monkeypatch) -> None:
