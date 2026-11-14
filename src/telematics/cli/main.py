@@ -26,6 +26,7 @@ from telematics.eval.harness import (
     run_deterministic_eval,
     run_model_eval,
 )
+from telematics.eval.manual import run_manual_eval
 from telematics.mcp.server import create_server
 from telematics.report.builder import (
     FaultSpec,
@@ -238,6 +239,9 @@ def _report(args: argparse.Namespace, *, drift_config: DriftConfig) -> int:
 
 def _eval(args: argparse.Namespace) -> int:
     """Run the no-key contract eval and, only when requested, the model layer."""
+    if args.manual and (args.model is not None or args.out is not None):
+        print("--manual cannot be combined with --model or --out", file=sys.stderr)
+        return 2
     if (args.out is not None or args.model is not None) and args.run_date is None:
         print("writing eval evidence requires --date YYYY-MM-DD", file=sys.stderr)
         return 2
@@ -254,6 +258,11 @@ def _eval(args: argparse.Namespace) -> int:
             print(f"  PASS {scenario.name}")
     if not result.passed:
         return 1
+    if args.manual:
+        manual = run_manual_eval(result)
+        print(f"\nManual eval: {manual.passed}/{manual.total} rubric passes")
+        print(f"Question-set SHA-256: {manual.question_set_sha256}")
+        return 0
     if args.model is None:
         if args.out is not None:
             output = Path(args.out)
@@ -435,6 +444,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     eval_parser.add_argument("--out", help="write evaluation evidence to this Markdown path")
     eval_parser.add_argument("--date", dest="run_date", type=_iso_date)
+    eval_parser.add_argument(
+        "--manual",
+        action="store_true",
+        help="run the interactive no-key rubric over the fixed scenarios",
+    )
     args = parser.parse_args(argv)
     drift_config: DriftConfig | None = None
     if args.command in {"demo", "serve", "shell", "stream", "report"}:

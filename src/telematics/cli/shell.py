@@ -56,7 +56,7 @@ class Shell(cmd.Cmd):
         self.failed = False
         self.failure_message = ""
         self.last_result: dict[str, Any] | None = None
-        self._previous_verdicts: dict[str, str] = {}
+        self._previous_all_blocked: bool | None = None
 
     def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
         try:
@@ -99,14 +99,21 @@ class Shell(cmd.Cmd):
     def _print_fleet_summary(self, result: dict[str, Any]) -> None:
         """Print the one-line fleet summary and watch for a fleet-wide flip."""
         vehicles = result.get("vehicles", [])
-        counts = Counter(item["data_quality"]["verdict"] for item in vehicles)
+        vehicle_count = int(result.get("vehicle_count", len(vehicles)))
+        counts = result.get("verdict_counts")
+        if counts is None:
+            counts = Counter(item["data_quality"]["verdict"] for item in vehicles)
         score = float(result.get("fleet_trust_score", 1.0))
         self._write(
-            f"{len(vehicles)} vehicles · fleet trust {score:.2f} · "
-            f"PASS {counts['PASS']} WARN {counts['WARN']} BLOCK {counts['BLOCK']}"
+            f"{vehicle_count} vehicles · fleet trust {score:.2f} · "
+            f"PASS {counts.get('PASS', 0)} WARN {counts.get('WARN', 0)} "
+            f"BLOCK {counts.get('BLOCK', 0)}"
             f"{self._sim_time_suffix(result)}"
         )
-        self._track_fleet_verdicts(vehicles)
+        self._track_fleet_verdicts(
+            vehicles,
+            all_blocked=vehicle_count > 0 and counts.get("BLOCK", 0) == vehicle_count,
+        )
 
     def _sim_time_suffix(self, result: dict[str, Any]) -> str:
         """Return the fleet's evaluation time in East Africa Time."""
@@ -118,18 +125,17 @@ class Shell(cmd.Cmd):
             return ""
         return f" · sim time {format_sim_time(datetime.fromisoformat(as_of))}"
 
-    def _track_fleet_verdicts(self, vehicles: list[dict[str, Any]]) -> None:
-        """Warn when every listed vehicle flips to BLOCK in one step."""
-        current = {item["vehicle_id"]: item["data_quality"]["verdict"] for item in vehicles}
-        previous = self._previous_verdicts
-        if (
-            current
-            and all(verdict == "BLOCK" for verdict in current.values())
-            and previous
-            and not all(verdict == "BLOCK" for verdict in previous.values())
-        ):
+    def _track_fleet_verdicts(
+        self, vehicles: list[dict[str, Any]], *, all_blocked: bool | None = None
+    ) -> None:
+        """Warn when the fleet flips to BLOCK in one step."""
+        if all_blocked is None:
+            all_blocked = bool(vehicles) and all(
+                item["data_quality"]["verdict"] == "BLOCK" for item in vehicles
+            )
+        if all_blocked and self._previous_all_blocked is False:
             self._write("Warning: entire fleet changed verdict together — check the simulator.")
-        self._previous_verdicts = current
+        self._previous_all_blocked = all_blocked
 
     def do_ls(self, argument: str) -> None:
         """List vehicles, worst quality first: ls [--limit N]."""

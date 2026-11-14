@@ -349,3 +349,18 @@ def test_ls_warns_when_the_whole_fleet_flips_to_block() -> None:
     assert (
         "Warning: entire fleet changed verdict together — check the simulator." in output.getvalue()
     )
+
+
+def test_fleet_summary_uses_fleet_totals_not_the_truncated_page() -> None:
+    output = StringIO()
+    shell = Shell(create_embedded_session(vehicles=12, seed=42, start=_START), stdout=output)
+    for vehicle_id in shell.session.backend.list_vehicle_ids()[:6]:
+        shell.onecmd(f"inject stale_device {vehicle_id} --severity high")
+    output.truncate(0)
+    output.seek(0)
+
+    shell.onecmd("fleet")
+
+    text = output.getvalue()
+    assert "12 vehicles · fleet trust" in text
+    assert "BLOCK 6" in text
