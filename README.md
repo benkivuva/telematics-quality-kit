@@ -182,8 +182,8 @@ The score weights and caps are asserted by `uv run pytest tests/unit/test_scorin
 | Verdict | Trust label | Meaning |
 | --- | --- | --- |
 | `PASS` âœ“ | **trust it** | Values are usable for decisions under the configured heuristics. |
-| `WARN` âš  | **be careful** | Values are returned with caveats. |
-| `BLOCK` â›” | **don't trust it** | A BLOCK is a normal result, not a tool error. Last-known location values may still be present and clearly labelled, but `usable_for_decision` is `false`; affected derived values are withheld and listed. |
+| `WARN` ⚠ | **be careful** | Values are returned with caveats. |
+| `BLOCK` ⛔ | **don't trust it** | A BLOCK is a normal result, not a tool error. Last-known location values may still be present and clearly labelled, but `usable_for_decision` is `false`; affected derived values are withheld and listed. |
 
 Every quality-bearing result includes a `data_quality` object with a plain-language label, symbol, verdict, score, `usable_for_decision`, caveats, withheld values, and the evaluation window. Detailed per-check metrics are available in verbose quality reports. Verdicts are always conveyed using text and a symbol, not color alone.
 
