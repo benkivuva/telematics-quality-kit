@@ -7,10 +7,11 @@ import shlex
 import sys
 from collections import Counter
 from datetime import datetime, timedelta
-from typing import Any, TextIO
+from typing import Any, TextIO, get_args
 
 from telematics.cli.formatting import format_sim_time, json_line, render_verdict
 from telematics.cli.session import AttachedSession, EmbeddedSession
+from telematics.mcp.schemas import FaultName
 from telematics.models.quality import Verdict
 
 _ALIASES = {
@@ -23,6 +24,7 @@ _ALIASES = {
     "fuel-spike": "fuel_sensor_spike",
     "burst": "buffered_burst",
 }
+_FAULTS = frozenset(get_args(FaultName))
 _FRESHNESS_LABELS = {Verdict.PASS: "Fresh", Verdict.WARN: "Aging", Verdict.BLOCK: "Stale"}
 _CHECK_ORDER = {Verdict.PASS: 0, Verdict.WARN: 1, Verdict.BLOCK: 2}
 
@@ -349,6 +351,16 @@ class Shell(cmd.Cmd):
                 fault: str | None = None
             else:
                 fault = _ALIASES.get(requested_fault, requested_fault)
+                if fault not in _FAULTS:
+                    raise ValueError(
+                        f"unknown fault: {requested_fault}; expected a fault name or all"
+                    )
+            if (
+                vehicle_id is not None
+                and isinstance(self.session, EmbeddedSession)
+                and vehicle_id not in self.session.backend.list_vehicle_ids()
+            ):
+                raise ValueError(f"unknown vehicle: {vehicle_id}")
         except ValueError as exc:
             self._fail(f"usage: clear [FAULT|all] [VEHICLE_ID] ({exc})")
             return
@@ -380,6 +392,11 @@ class Shell(cmd.Cmd):
                 )
         else:
             self._write(f"cleared {cleared} simulator faults")
+        if cleared:
+            self._write(
+                "Note: cleared active faults, but historical bad points remain. "
+                "Use 'reset' to wipe the simulator history."
+            )
 
     def do_faults(self, _argument: str) -> None:
         """Show active embedded simulator fault IDs."""

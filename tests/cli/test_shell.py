@@ -1,6 +1,7 @@
 """Interactive shell command and script tests."""
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 
@@ -280,6 +281,81 @@ def test_faults_lists_severity() -> None:
     shell.onecmd("faults")
 
     assert "duplicate_heartbeats TRK-0001 (high)" in output.getvalue()
+
+
+def test_clear_rejects_a_vehicle_id_in_the_fault_position() -> None:
+    output = StringIO()
+
+    result = execute_command(
+        create_embedded_session(vehicles=1, seed=3, start=_START),
+        "clear TRK-0001 rural_blackout",
+        stdout=output,
+    )
+
+    text = output.getvalue()
+    assert result == 1
+    assert "error:" in text
+    assert "unknown fault: TRK-0001" in text
+    assert "validation error" not in text.lower()
+    assert "input should be" not in text.lower()
+
+
+def test_clear_rejects_an_unknown_vehicle() -> None:
+    output = StringIO()
+
+    result = execute_command(
+        create_embedded_session(vehicles=1, seed=3, start=_START),
+        "clear all FAKE-9999",
+        stdout=output,
+    )
+
+    assert result == 1
+    assert "unknown vehicle: FAKE-9999" in output.getvalue()
+
+
+def test_clear_warns_that_history_remains() -> None:
+    output = StringIO()
+    shell = Shell(create_embedded_session(vehicles=1, seed=3, start=_START), stdout=output)
+    shell.onecmd("inject stale_device TRK-0001 --severity high")
+    output.truncate(0)
+    output.seek(0)
+
+    shell.onecmd("clear all")
+
+    assert (
+        "Note: cleared active faults, but historical bad points remain. "
+        "Use 'reset' to wipe the simulator history." in output.getvalue()
+    )
+
+
+@pytest.mark.integration
+def test_shell_does_not_emit_mcp_info_logs() -> None:
+    records: list[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = Capture()
+    logger = logging.getLogger("mcp")
+    logger.addHandler(handler)
+    root = logging.getLogger()
+    previous_root_level = root.level
+    root.setLevel(logging.INFO)
+    output = StringIO()
+    try:
+        result = execute_command(
+            create_embedded_session(vehicles=1, seed=3, start=_START),
+            "get FAKE-9999",
+            stdout=output,
+        )
+    finally:
+        logger.removeHandler(handler)
+        root.setLevel(previous_root_level)
+
+    assert result == 1
+    assert "error:" in output.getvalue()
+    assert not [record for record in records if record.levelno == logging.INFO]
 
 
 def test_clear_lists_the_faults_it_cleared() -> None:
