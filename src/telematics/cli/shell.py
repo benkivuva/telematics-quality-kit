@@ -138,19 +138,57 @@ class Shell(cmd.Cmd):
         self._previous_all_blocked = all_blocked
 
     def do_ls(self, argument: str) -> None:
-        """List vehicles, worst quality first: ls [--limit N]."""
+        """List vehicles, worst quality first: ls [--worse-than V] [--limit N]."""
         try:
             tokens = shlex.split(argument)
+            unknown = [
+                token
+                for token in tokens
+                if token.startswith("--") and token not in {"--limit", "--worse-than"}
+            ]
+            if unknown:
+                raise ValueError(f"unknown option: {unknown[0]}")
+            if tokens.count("--limit") > 1 or tokens.count("--worse-than") > 1:
+                raise ValueError("options may appear only once")
             limit = int(tokens[tokens.index("--limit") + 1]) if "--limit" in tokens else 50
-            result = self._call("list_vehicles", {"limit": limit})
+            if not 1 <= limit <= 200:
+                raise ValueError("--limit must be between 1 and 200")
+            worse_than = Verdict.PASS
+            if "--worse-than" in tokens:
+                value = tokens[tokens.index("--worse-than") + 1].upper()
+                try:
+                    worse_than = Verdict(value)
+                except ValueError:
+                    raise ValueError("--worse-than must be PASS, WARN, or BLOCK") from None
         except (ValueError, IndexError) as exc:
-            self._fail(f"usage: ls [--limit 1..200] ({exc})")
+            self._fail(f"usage: ls [--worse-than PASS|WARN|BLOCK] [--limit 1..200] ({exc})")
             return
-        if result is None:
-            return
-        vehicles = result.get("vehicles", [])
-        vehicles.sort(key=lambda item: (item["data_quality"]["trust_score"], item["vehicle_id"]))
-        for item in vehicles:
+        vehicles: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            arguments: dict[str, Any] = {"limit": 200}
+            if cursor is not None:
+                arguments["cursor"] = cursor
+            result = self._call("list_vehicles", arguments)
+            if result is None:
+                return
+            vehicles.extend(result.get("vehicles", []))
+            cursor = result.get("next_cursor")
+            if cursor is None:
+                break
+        filtered = [
+            item
+            for item in vehicles
+            if Verdict(item["data_quality"]["verdict"]).severity >= worse_than.severity
+        ]
+        filtered.sort(
+            key=lambda item: (
+                -Verdict(item["data_quality"]["verdict"]).severity,
+                item["data_quality"]["trust_score"],
+                item["vehicle_id"],
+            )
+        )
+        for item in filtered[:limit]:
             quality = item["data_quality"]
             verdict = Verdict(quality["verdict"])
             self._write(

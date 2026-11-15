@@ -39,6 +39,10 @@ class MemoryPointStore:
         if len(vehicle_points) > self._max_points_per_vehicle:
             del vehicle_points[: len(vehicle_points) - self._max_points_per_vehicle]
 
+    def clear_vehicle(self, vehicle_id: str) -> None:
+        """Remove one vehicle's points so a simulator rebuild can replace them."""
+        self._points.pop(vehicle_id, None)
+
     def points(self, vehicle_id: str) -> tuple[TelemetryPoint, ...]:
         return tuple(self._points.get(vehicle_id, ()))
 

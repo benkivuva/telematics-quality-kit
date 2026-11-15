@@ -70,6 +70,27 @@ def test_fleet_tools_block_when_the_first_vehicle_is_blocked() -> None:
 
 
 @pytest.mark.integration
+def test_one_fault_in_a_hundred_vehicle_fleet_blocks_only_its_vehicle() -> None:
+    session = _session(100)
+    session.advance(timedelta(minutes=10))
+    target = session.backend.list_vehicle_ids()[-1]
+
+    session.call_tool(
+        "inject_fault",
+        {
+            "vehicle_id": target,
+            "fault": "gps_drift",
+            "params": {"severity": "high"},
+        },
+    )
+    payload = session.call_tool("get_quality_report", {})
+
+    assert payload["verdict_counts"] == {"PASS": 99, "WARN": 0, "BLOCK": 1}
+    assert payload["data_quality"]["blocked_vehicles"] == [target]
+    assert payload["data_quality"]["blocked_vehicle_count"] == 1
+
+
+@pytest.mark.integration
 def test_clean_fleet_stays_pass_and_usable() -> None:
     session = _session(2)
 

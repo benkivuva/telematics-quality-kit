@@ -351,6 +351,32 @@ def test_ls_warns_when_the_whole_fleet_flips_to_block() -> None:
     )
 
 
+def test_ls_worse_than_filters_out_healthier_vehicles() -> None:
+    output = StringIO()
+    shell = Shell(create_embedded_session(vehicles=6, seed=42, start=_START), stdout=output)
+    shell.onecmd("inject stale_device TRK-0001 --severity high")
+    shell.onecmd("inject stale_device TRK-0002 --severity low")
+    output.truncate(0)
+    output.seek(0)
+
+    shell.onecmd("ls --worse-than WARN --limit 10")
+
+    lines = [line for line in output.getvalue().splitlines() if line.strip()]
+    assert len(lines) == 2
+    assert lines[0].startswith("TRK-0001")
+    assert lines[1].startswith("TRK-0002")
+
+
+def test_ls_rejects_an_unknown_worse_than_value() -> None:
+    output = StringIO()
+    shell = Shell(create_embedded_session(vehicles=1, seed=42, start=_START), stdout=output)
+
+    shell.onecmd("ls --worse-than BROKEN")
+
+    assert "error:" in output.getvalue()
+    assert "--worse-than must be PASS, WARN, or BLOCK" in output.getvalue()
+
+
 def test_fleet_summary_uses_fleet_totals_not_the_truncated_page() -> None:
     output = StringIO()
     shell = Shell(create_embedded_session(vehicles=12, seed=42, start=_START), stdout=output)

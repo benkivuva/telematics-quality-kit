@@ -39,6 +39,21 @@ def test_memory_store_prunes_by_receive_time_and_hard_point_limit() -> None:
 
 
 @pytest.mark.unit
+def test_memory_store_clears_one_vehicle_without_touching_others() -> None:
+    origin = datetime(2024, 4, 5, 6, 0, tzinfo=UTC)
+    store = MemoryPointStore()
+    first = point(origin, origin)
+    second = point(origin + timedelta(seconds=1), origin + timedelta(seconds=1))
+    store.append("TRK-0001", first)
+    store.append("LRY-0001", second)
+
+    store.clear_vehicle("TRK-0001")
+
+    assert store.points("TRK-0001") == ()
+    assert store.points("LRY-0001") == (second,)
+
+
+@pytest.mark.unit
 def test_memory_store_retains_out_of_order_device_time_in_append_order() -> None:
     origin = datetime(2024, 4, 5, 6, 0, tzinfo=UTC)
     store = MemoryPointStore()
