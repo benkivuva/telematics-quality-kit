@@ -184,7 +184,7 @@ class SimulatorBackend:
         fault_id = f"fault-{self._next_fault_id:04d}"
         self._next_fault_id += 1
         self._active_faults[fault_id] = ActiveFault(vehicle_id, fault, dict(params), expires_at)
-        self._rebuild_store()
+        self._rebuild_vehicle(vehicle_id)
         impact = {
             "stale_device": "freshness BLOCK at high severity (device time shifted by 20m)",
             "gps_drift": "drift BLOCK within 2m at high severity (implausible consecutive fixes)",
@@ -213,8 +213,8 @@ class SimulatorBackend:
         for fault_id, active in selected:
             del self._active_faults[fault_id]
             self.event_tap.publish(FaultCleared(active.vehicle_id, active.name))
-        if selected:
-            self._rebuild_store()
+        for affected_vehicle in sorted({active.vehicle_id for _, active in selected}):
+            self._rebuild_vehicle(affected_vehicle)
         return len(selected)
 
     def _expire_faults(self) -> bool:
@@ -229,7 +229,8 @@ class SimulatorBackend:
             for fault_id, active in expired:
                 del self._active_faults[fault_id]
                 self.event_tap.publish(FaultCleared(active.vehicle_id, active.name))
-            self._rebuild_store()
+            for vehicle_id in sorted({active.vehicle_id for _, active in expired}):
+                self._rebuild_vehicle(vehicle_id)
         return bool(expired)
 
     def _pipelines(self) -> dict[str, IngestPipeline]:
@@ -249,27 +250,24 @@ class SimulatorBackend:
             raise ValueError("fault duration must end in s, m, or h")
         return timedelta(seconds=int(value[:-1]) * multiplier)
 
-    def _rebuild_store(self) -> None:
-        self._store = MemoryPointStore()
-        pipelines = {
-            name: IngestPipeline(codec, self._store, clock=self._clock, event_tap=self.event_tap)
-            for name, codec in self._codecs.items()
-        }
-        active_by_vehicle: dict[str, list[tuple[str, Mapping[str, int | float | str]]]] = {}
-        for active in self._active_faults.values():
-            active_by_vehicle.setdefault(active.vehicle_id, []).append((active.name, active.params))
-        for vehicle_id, frame, received_at in self._base_frames:
-            self._ingest_faulted(
-                pipelines,
-                vehicle_id,
-                frame,
-                [
-                    (fault, params)
-                    for fault, params in active_by_vehicle.get(vehicle_id, [])
-                    if fault != "rural_blackout"
-                ],
-                received_at=received_at,
-            )
+    def _rebuild_vehicle(self, vehicle_id: str) -> None:
+        """Rewrite only one vehicle's points, leaving the rest of the fleet untouched."""
+        self._store.clear_vehicle(vehicle_id)
+        faults = [
+            (active.name, active.params)
+            for active in self._active_faults.values()
+            if active.vehicle_id == vehicle_id and active.name != "rural_blackout"
+        ]
+        pipelines = self._pipelines()
+        for owner, frame, received_at in self._base_frames:
+            if owner == vehicle_id:
+                self._ingest_faulted(
+                    pipelines,
+                    vehicle_id,
+                    frame,
+                    faults,
+                    received_at=received_at,
+                )
 
     def _ingest_faulted(
         self,

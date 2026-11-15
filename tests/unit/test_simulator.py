@@ -255,6 +255,24 @@ def test_injecting_after_advance_preserves_original_receive_times() -> None:
 
 
 @pytest.mark.unit
+def test_injecting_a_fault_republishes_only_the_target_vehicle() -> None:
+    start = datetime(2024, 4, 5, 6, 7, 8, tzinfo=UTC)
+    tap = EventTap()
+    subscription = tap.subscribe(maxsize=4096)
+    backend = SimulatorBackend(seed=42, clock=ManualClock(start), vehicles=12, event_tap=tap)
+    while not subscription.empty():
+        subscription.get_nowait()
+
+    backend.inject_fault("TRK-0001", "gps_drift", {"severity": "high"})
+
+    events = []
+    while not subscription.empty():
+        events.append(subscription.get_nowait())
+    assert events
+    assert {event.vehicle_id for event in events} == {"TRK-0001"}
+
+
+@pytest.mark.unit
 def test_clearing_one_fault_preserves_other_active_faults() -> None:
     start = datetime(2024, 4, 5, 6, 7, 8, tzinfo=UTC)
     backend = SimulatorBackend(seed=42, clock=ManualClock(start), vehicles=2)

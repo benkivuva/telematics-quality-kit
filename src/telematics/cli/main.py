@@ -5,7 +5,7 @@ import math
 import shlex
 import sys
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Event, Thread
 
@@ -13,13 +13,20 @@ from telematics.backends.simulator import SimulatorBackend
 from telematics.cli.doctor import doctor as run_doctor
 from telematics.cli.formatting import configure_utf8_stdout
 from telematics.cli.init import init_command
-from telematics.cli.inject import inject_and_wait
+from telematics.cli.inject import canonical_fault, inject_and_wait
 from telematics.cli.session import AttachedSession, EmbeddedSession, create_embedded_session
 from telematics.cli.shell import Shell, execute_command, run_script
 from telematics.cli.stream import add_stream_parser
 from telematics.cli.stream import stream as run_stream
 from telematics.clock import ManualClock
 from telematics.config import DriftConfig, FreshnessConfig, drift_config_from_environment
+from telematics.eval.harness import (
+    render_deterministic_results,
+    render_eval_results,
+    run_deterministic_eval,
+    run_model_eval,
+)
+from telematics.eval.manual import run_manual_eval
 from telematics.mcp.server import create_server
 from telematics.report.builder import (
     FaultSpec,
@@ -51,7 +58,7 @@ def _demo(*, vehicles: int, seed: int, drift_config: DriftConfig) -> int:
         drift_config=drift_config,
     )
     after = stale_service.list_vehicles(as_of=as_of)
-    print("Phase 2 telematics demo — baseline")
+    print("telematics demo - baseline")
     print("vehicle      verdict  trust score")
     for vehicle in baseline:
         print(
@@ -132,6 +139,31 @@ def _positive_detail(value: str) -> int:
     if not 1 <= detail <= 200:
         raise argparse.ArgumentTypeError("detail must be between 1 and 200")
     return detail
+
+
+def _inject_fault(value: str) -> str:
+    """Validate a fault name or alias before any network call."""
+    try:
+        return canonical_fault(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _inject_duration(value: str) -> str:
+    """Validate the textual duration while preserving its original form."""
+    _duration_seconds(value)
+    return value
+
+
+def _iso_date(value: str) -> date:
+    """Parse an evidence date without reading the wall clock."""
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("date must use YYYY-MM-DD format") from exc
+    if parsed.isoformat() != value:
+        raise argparse.ArgumentTypeError("date must use YYYY-MM-DD format")
+    return parsed
 
 
 def _report(args: argparse.Namespace, *, drift_config: DriftConfig) -> int:
@@ -216,6 +248,60 @@ def _report(args: argparse.Namespace, *, drift_config: DriftConfig) -> int:
 
         webbrowser.open(target.resolve().as_uri())
     print(f"wrote report to {target}")
+    return 0
+
+
+def _eval(args: argparse.Namespace) -> int:
+    """Run the no-key contract eval and, only when requested, the model layer."""
+    if args.manual and (args.model is not None or args.out is not None):
+        print("--manual cannot be combined with --model or --out", file=sys.stderr)
+        return 2
+    if (args.out is not None or args.model is not None) and args.run_date is None:
+        print("writing eval evidence requires --date YYYY-MM-DD", file=sys.stderr)
+        return 2
+    result = run_deterministic_eval(seed=args.seed)
+    print(
+        f"Deterministic eval: {len(result.scenarios)} scenarios, "
+        f"{result.assertions_passed}/{result.assertions_total} assertions passed"
+    )
+    for scenario in result.scenarios:
+        failures = [name for name, passed in scenario.assertions if not passed]
+        if failures:
+            print(f"  FAIL {scenario.name}: {', '.join(failures)}")
+        else:
+            print(f"  PASS {scenario.name}")
+    if not result.passed:
+        return 1
+    if args.manual:
+        manual = run_manual_eval(result)
+        print(f"\nManual eval: {manual.passed}/{manual.total} rubric passes")
+        print(f"Question-set SHA-256: {manual.question_set_sha256}")
+        return 0
+    if args.model is None:
+        if args.out is not None:
+            output = Path(args.out)
+            try:
+                output.write_text(
+                    render_deterministic_results(result, run_date=args.run_date),
+                    encoding="utf-8",
+                    newline="\n",
+                )
+            except OSError as exc:
+                print(f"cannot write eval results {output}: {exc}", file=sys.stderr)
+                return 4
+            print(f"Deterministic eval results written to {output}")
+        return 0
+    try:
+        model_result = run_model_eval(args.model, seed=args.seed, run_date=args.run_date)
+        output = Path(args.out or "docs/eval-results.md")
+        output.write_text(render_eval_results(model_result), encoding="utf-8", newline="\n")
+    except ValueError as exc:
+        print(f"cannot run model eval: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, RuntimeError) as exc:
+        print(f"model eval failed: {exc}", file=sys.stderr)
+        return 4
+    print(f"Model eval results written to {output}")
     return 0
 
 
@@ -340,10 +426,10 @@ def main(argv: list[str] | None = None) -> int:
     shell_mode.add_argument("-c", dest="shell_command")
     shell_mode.add_argument("--script")
     inject = commands.add_parser("inject", help="inject a fault into an attached simulator")
-    inject.add_argument("fault")
+    inject.add_argument("fault", type=_inject_fault)
     inject.add_argument("--vehicle", required=True)
     inject.add_argument("--severity", choices=("low", "medium", "high"), default="medium")
-    inject.add_argument("--duration")
+    inject.add_argument("--duration", type=_inject_duration)
     inject.add_argument("--url", default="http://127.0.0.1:8000/mcp")
     inject.add_argument("--wait", nargs="?", const="30s", type=_duration_seconds)
     inject.add_argument("--expect", choices=("PASS", "WARN", "BLOCK"), default="BLOCK")
@@ -365,6 +451,18 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--profile-mix", type=_parse_profile_mix)
     report.add_argument("--out", default="fleet-report.html")
     report.add_argument("--open", action="store_true")
+    eval_parser = commands.add_parser("eval", help="run deterministic and optional model evals")
+    eval_parser.add_argument("--seed", type=int, default=42)
+    eval_parser.add_argument(
+        "--model", help="optional Gemini model identifier; requires an API key"
+    )
+    eval_parser.add_argument("--out", help="write evaluation evidence to this Markdown path")
+    eval_parser.add_argument("--date", dest="run_date", type=_iso_date)
+    eval_parser.add_argument(
+        "--manual",
+        action="store_true",
+        help="run the interactive no-key rubric over the fixed scenarios",
+    )
     args = parser.parse_args(argv)
     drift_config: DriftConfig | None = None
     if args.command in {"demo", "serve", "shell", "stream", "report"}:
@@ -430,4 +528,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "report":
         assert drift_config is not None
         return _report(args, drift_config=drift_config)
+    if args.command == "eval":
+        return _eval(args)
     return 0

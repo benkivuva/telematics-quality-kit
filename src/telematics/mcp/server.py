@@ -1,7 +1,7 @@
 """MCP v2 registration for the v0.1 query, quality, and simulator surface."""
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from functools import wraps
 from itertools import pairwise
@@ -15,7 +15,7 @@ from telematics.clock import Clock
 from telematics.mcp import schemas
 from telematics.mcp.prompts import register_prompts
 from telematics.mcp.resources import register_resources
-from telematics.models.quality import CheckResult, Verdict
+from telematics.models.quality import CheckResult, Verdict, worst_verdict
 from telematics.models.telemetry import TelemetryPoint
 from telematics.service.vehicles import DataQuality, VehicleService, VehicleSummary
 
@@ -29,6 +29,8 @@ _NEXT_CHECK = {
     "plausibility": "get_quality_report",
     "fuel": "get_fuel_events",
 }
+_FLEET_REPORT_LIMIT = 10
+_HISTOGRAM_LABELS = ("0.0-0.2", "0.2-0.4", "0.4-0.6", "0.6-0.8", "0.8-1.0")
 
 
 def _structured_errors[**P, R](function: Callable[P, R]) -> Callable[P, R]:
@@ -88,6 +90,8 @@ def _quality_output(
         usable_for_decision=quality.usable_for_decision,
         caveats=list(quality.caveats),
         withheld=list(quality.withheld),
+        blocked_vehicles=list(quality.blocked_vehicles),
+        blocked_vehicle_count=quality.blocked_vehicle_count,
         checks=_check_outputs(quality.checks) if verbose else [],
         as_of=as_of,
         window=schemas.WindowOutput(start=start, end=end),
@@ -127,6 +131,37 @@ def _evaluate(
     return service.evaluate_vehicle(vehicle_id, as_of=as_of, start=start, end=end)
 
 
+def _cursor_start(ids: Sequence[str], cursor: str | None) -> int:
+    """Return the page offset for a last-seen vehicle ID cursor."""
+    if cursor is None:
+        return 0
+    try:
+        return ids.index(cursor) + 1
+    except ValueError as exc:
+        raise ValueError("invalid vehicle cursor") from exc
+
+
+def _fleet_rank(summary: VehicleSummary) -> tuple[int, float]:
+    """Order the fleet worst first by severity and trust score, stable on ties."""
+    quality = summary.data_quality
+    return (-quality.verdict.severity, quality.trust_score)
+
+
+def _verdict_counts(vehicles: Sequence[VehicleSummary]) -> dict[str, int]:
+    counts = {"PASS": 0, "WARN": 0, "BLOCK": 0}
+    for item in vehicles:
+        counts[item.data_quality.verdict.value] += 1
+    return counts
+
+
+def _trust_score_histogram(vehicles: Sequence[VehicleSummary]) -> dict[str, int]:
+    counts = dict.fromkeys(_HISTOGRAM_LABELS, 0)
+    for item in vehicles:
+        index = min(int(item.data_quality.trust_score * 5), len(_HISTOGRAM_LABELS) - 1)
+        counts[_HISTOGRAM_LABELS[index]] += 1
+    return counts
+
+
 def create_server(
     service: VehicleService, *, as_of: datetime, clock: Clock | None = None
 ) -> MCPServer:
@@ -145,14 +180,13 @@ def create_server(
     @_structured_errors
     def list_vehicles(limit: int = 50, cursor: str | None = None) -> schemas.ListVehiclesOutput:
         request = schemas.ListVehiclesInput.model_validate({"limit": limit, "cursor": cursor})
-        summaries = service.list_vehicles(
-            as_of=current_time(), limit=request.limit, cursor=request.cursor
-        )
+        now = current_time()
+        summaries = service.list_vehicles(as_of=now, limit=request.limit, cursor=request.cursor)
         ids = service.list_vehicle_ids()
         last_id = summaries[-1].vehicle_id if summaries else None
         next_cursor = last_id if last_id is not None and ids.index(last_id) < len(ids) - 1 else None
         return schemas.ListVehiclesOutput(
-            vehicles=[_vehicle_output(item, as_of=current_time()) for item in summaries],
+            vehicles=[_vehicle_output(item, as_of=now) for item in summaries],
             next_cursor=next_cursor,
         )
 
@@ -165,7 +199,8 @@ def create_server(
     @_structured_errors
     def get_vehicle_location(vehicle_id: str) -> schemas.VehicleLocationOutput:
         request = schemas.VehicleIdInput.model_validate({"vehicle_id": vehicle_id})
-        item = _evaluate(service, request.vehicle_id, as_of=current_time())
+        now = current_time()
+        item = _evaluate(service, request.vehicle_id, as_of=now)
         return schemas.VehicleLocationOutput(
             vehicle_id=item.vehicle_id,
             device_time=item.latest.device_time,
@@ -175,7 +210,7 @@ def create_server(
             age_seconds=item.data_quality.age_seconds,
             data_quality=_quality_output(
                 item.data_quality,
-                as_of=current_time(),
+                as_of=now,
                 start=item.points[0].device_time,
                 end=item.latest.device_time,
             ),
@@ -197,13 +232,14 @@ def create_server(
         request = schemas.TripHistoryInput.model_validate(
             {"vehicle_id": vehicle_id, "start": start, "end": end, "last": last}
         )
+        now = current_time()
         window_start, window_end = _bounds(
-            as_of=current_time(), last=request.last, start=request.start, end=request.end
+            as_of=now, last=request.last, start=request.start, end=request.end
         )
         item = _evaluate(
             service,
             request.vehicle_id,
-            as_of=current_time(),
+            as_of=now,
             start=window_start,
             end=window_end,
         )
@@ -220,7 +256,7 @@ def create_server(
             ],
             data_quality=_quality_output(
                 item.data_quality,
-                as_of=current_time(),
+                as_of=now,
                 start=window_start,
                 end=window_end,
             ),
@@ -238,39 +274,49 @@ def create_server(
         start: datetime | None = None,
         end: datetime | None = None,
         last: str | None = None,
+        limit: int = 50,
     ) -> schemas.FuelEventsOutput:
         request = schemas.FuelEventsInput.model_validate(
-            {"vehicle_id": vehicle_id, "start": start, "end": end, "last": last}
+            {"vehicle_id": vehicle_id, "start": start, "end": end, "last": last, "limit": limit}
         )
+        now = current_time()
         window_start, window_end = _bounds(
-            as_of=current_time(), last=request.last, start=request.start, end=request.end
+            as_of=now, last=request.last, start=request.start, end=request.end
         )
-        ids = (request.vehicle_id,) if request.vehicle_id else service.list_vehicle_ids()
-        events: list[schemas.FuelEventOutput] = []
-        for identifier in ids:
+        summaries: tuple[VehicleSummary, ...]
+        if request.vehicle_id is not None:
             item = _evaluate(
                 service,
-                identifier,
-                as_of=current_time(),
+                request.vehicle_id,
+                as_of=now,
                 start=window_start,
                 end=window_end,
             )
+            summaries = (item,)
+            quality = item.data_quality
+        else:
+            fleet = service.evaluate_fleet(as_of=now, start=window_start, end=window_end)
+            summaries = fleet.vehicles
+            quality = fleet.data_quality
+        events: list[schemas.FuelEventOutput] = []
+        for item in summaries:
             fuel_check = next(check for check in item.data_quality.checks if check.name == "fuel")
             if fuel_check.verdict is not Verdict.PASS:
                 events.append(
                     schemas.FuelEventOutput(
-                        vehicle_id=identifier,
+                        vehicle_id=item.vehicle_id,
                         device_time=item.latest.device_time,
                         drop_percent=float(fuel_check.metric.get("unexplained_drop", 0)),
                         quality_flag="unexplained_drop",
                     )
                 )
-        representative = service.list_vehicles(as_of=current_time(), limit=1)[0]
         return schemas.FuelEventsOutput(
-            events=events,
+            events=events[: request.limit],
+            total_events=len(events),
+            truncated=len(events) > request.limit,
             data_quality=_quality_output(
-                representative.data_quality,
-                as_of=current_time(),
+                quality,
+                as_of=now,
                 start=window_start,
                 end=window_end,
             ),
@@ -292,9 +338,10 @@ def create_server(
         request = schemas.QualityReportInput.model_validate(
             {"vehicle_id": vehicle_id, "verbose": verbose}
         )
+        now = current_time()
         if request.vehicle_id is not None:
-            item = _evaluate(service, request.vehicle_id, as_of=current_time())
-            vehicle = _vehicle_output(item, as_of=current_time(), verbose=request.verbose)
+            item = _evaluate(service, request.vehicle_id, as_of=now)
+            vehicle = _vehicle_output(item, as_of=now, verbose=request.verbose)
             return schemas.QualityReportOutput(
                 vehicle_id=vehicle.vehicle_id,
                 device_time=vehicle.device_time,
@@ -303,20 +350,24 @@ def create_server(
                 speed_kph=vehicle.speed_kph,
                 data_quality=vehicle.data_quality,
             )
-        ids = service.list_vehicle_ids()
-        summaries = [_evaluate(service, identifier, as_of=current_time()) for identifier in ids]
-        score = (
-            sum(item.data_quality.trust_score for item in summaries) / len(summaries)
-            if summaries
-            else 1.0
-        )
+        fleet = service.evaluate_fleet(as_of=now)
+        ranked = sorted(fleet.vehicles, key=_fleet_rank)
         return schemas.QualityReportOutput(
             vehicle_id=None,
-            fleet_trust_score=score,
+            fleet_trust_score=fleet.data_quality.trust_score,
+            vehicle_count=len(fleet.vehicles),
+            verdict_counts=_verdict_counts(fleet.vehicles),
+            trust_score_histogram=_trust_score_histogram(fleet.vehicles),
             vehicles=[
-                _vehicle_output(item, as_of=current_time(), verbose=request.verbose)
-                for item in summaries
+                _vehicle_output(item, as_of=now, verbose=request.verbose)
+                for item in ranked[:_FLEET_REPORT_LIMIT]
             ],
+            data_quality=_quality_output(
+                fleet.data_quality,
+                as_of=now,
+                start=min(item.points[0].device_time for item in fleet.vehicles),
+                end=max(item.latest.device_time for item in fleet.vehicles),
+            ),
         )
 
     @server.tool(
@@ -326,26 +377,35 @@ def create_server(
         structured_output=True,
     )
     @_structured_errors
-    def check_fleet_freshness() -> schemas.FleetFreshnessOutput:
-        request = schemas.FleetFreshnessInput.model_validate({})
-        del request
-        summaries = service.list_vehicles(as_of=current_time(), limit=200)
-        representative = summaries[0]
+    def check_fleet_freshness(
+        limit: int = 50, cursor: str | None = None
+    ) -> schemas.FleetFreshnessOutput:
+        request = schemas.FleetFreshnessInput.model_validate({"limit": limit, "cursor": cursor})
+        now = current_time()
+        fleet = service.evaluate_fleet(as_of=now)
+        ids = [item.vehicle_id for item in fleet.vehicles]
+        start = _cursor_start(ids, request.cursor)
+        page = fleet.vehicles[start : start + request.limit]
+        next_cursor = page[-1].vehicle_id if page and start + request.limit < len(ids) else None
         return schemas.FleetFreshnessOutput(
-            fleet_trust_score=service.fleet_trust_score(as_of=current_time()),
+            fleet_trust_score=fleet.data_quality.trust_score,
             vehicles=[
                 schemas.FleetFreshnessVehicleOutput(
                     vehicle_id=item.vehicle_id,
                     age_seconds=item.data_quality.age_seconds,
-                    verdict=item.data_quality.checks[0].verdict.value,
+                    verdict=next(
+                        check for check in item.data_quality.checks if check.name == "freshness"
+                    ).verdict.value,
                 )
-                for item in summaries
+                for item in page
             ],
+            vehicle_count=len(ids),
+            next_cursor=next_cursor,
             data_quality=_quality_output(
-                representative.data_quality,
-                as_of=current_time(),
-                start=representative.points[0].device_time,
-                end=representative.latest.device_time,
+                fleet.data_quality,
+                as_of=now,
+                start=min(item.points[0].device_time for item in fleet.vehicles),
+                end=max(item.latest.device_time for item in fleet.vehicles),
             ),
         )
 
@@ -365,13 +425,14 @@ def create_server(
         request = schemas.DriftReportInput.model_validate(
             {"vehicle_id": vehicle_id, "start": start, "end": end, "last": last}
         )
+        now = current_time()
         window_start, window_end = _bounds(
-            as_of=current_time(), last=request.last, start=request.start, end=request.end
+            as_of=now, last=request.last, start=request.start, end=request.end
         )
         item = _evaluate(
             service,
             request.vehicle_id,
-            as_of=current_time(),
+            as_of=now,
             start=window_start,
             end=window_end,
         )
@@ -384,7 +445,7 @@ def create_server(
             flagged_fraction=float(check.metric["flagged_fraction"]),
             data_quality=_quality_output(
                 item.data_quality,
-                as_of=current_time(),
+                as_of=now,
                 start=window_start,
                 end=window_end,
             ),
@@ -405,21 +466,15 @@ def create_server(
         request = schemas.DuplicatesReportInput.model_validate(
             {"start": start, "end": end, "last": last}
         )
+        now = current_time()
         window_start, window_end = _bounds(
-            as_of=current_time(), last=request.last, start=request.start, end=request.end
+            as_of=now, last=request.last, start=request.start, end=request.end
         )
-        checks: list[CheckResult] = []
-        for identifier in service.list_vehicle_ids():
-            item = _evaluate(
-                service,
-                identifier,
-                as_of=current_time(),
-                start=window_start,
-                end=window_end,
-            )
-            checks.append(
-                next(check for check in item.data_quality.checks if check.name == "duplicates")
-            )
+        fleet = service.evaluate_fleet(as_of=now, start=window_start, end=window_end)
+        checks: list[CheckResult] = [
+            next(check for check in item.data_quality.checks if check.name == "duplicates")
+            for item in fleet.vehicles
+        ]
         return schemas.DuplicatesReportOutput(
             duplicate_count=sum(int(check.metric["duplicate_count"]) for check in checks),
             duplicate_fraction=(
@@ -430,14 +485,10 @@ def create_server(
             heartbeat_rate_ratio=max(
                 (float(check.metric["heartbeat_rate_ratio"]) for check in checks), default=0.0
             ),
-            verdict=max(
-                (check.verdict for check in checks),
-                key=lambda value: list(Verdict).index(value),
-                default=Verdict.PASS,
-            ).value,
+            verdict=worst_verdict(check.verdict for check in checks).value,
             data_quality=_quality_output(
-                service.list_vehicles(as_of=current_time(), limit=1)[0].data_quality,
-                as_of=current_time(),
+                fleet.data_quality,
+                as_of=now,
                 start=window_start,
                 end=window_end,
             ),
@@ -450,18 +501,22 @@ def create_server(
         structured_output=True,
     )
     @_structured_errors
-    def list_quality_issues(min_verdict: str = "WARN") -> schemas.QualityIssuesOutput:
-        request = schemas.QualityIssuesInput.model_validate({"min_verdict": min_verdict})
-        min_level = 1 if request.min_verdict == "WARN" else 2
+    def list_quality_issues(
+        min_verdict: str = "WARN", limit: int = 50
+    ) -> schemas.QualityIssuesOutput:
+        request = schemas.QualityIssuesInput.model_validate(
+            {"min_verdict": min_verdict, "limit": limit}
+        )
+        min_level = Verdict(request.min_verdict).severity
+        now = current_time()
+        fleet = service.evaluate_fleet(as_of=now)
         issues: list[schemas.QualityIssueOutput] = []
-        for identifier in service.list_vehicle_ids():
-            item = _evaluate(service, identifier, as_of=current_time())
+        for item in fleet.vehicles:
             for check in item.data_quality.checks:
-                level = list(Verdict).index(check.verdict)
-                if level >= min_level:
+                if check.verdict.severity >= min_level:
                     issues.append(
                         schemas.QualityIssueOutput(
-                            vehicle_id=identifier,
+                            vehicle_id=item.vehicle_id,
                             check=check.name,
                             verdict=cast(Literal["WARN", "BLOCK"], check.verdict.value),
                             score=check.score,
@@ -476,14 +531,15 @@ def create_server(
                 issue.check,
             )
         )
-        representative = service.list_vehicles(as_of=current_time(), limit=1)[0]
         return schemas.QualityIssuesOutput(
-            issues=issues,
+            issues=issues[: request.limit],
+            total_issues=len(issues),
+            truncated=len(issues) > request.limit,
             data_quality=_quality_output(
-                representative.data_quality,
-                as_of=current_time(),
-                start=representative.points[0].device_time,
-                end=representative.latest.device_time,
+                fleet.data_quality,
+                as_of=now,
+                start=min(item.points[0].device_time for item in fleet.vehicles),
+                end=max(item.latest.device_time for item in fleet.vehicles),
             ),
         )
 
@@ -508,18 +564,18 @@ def create_server(
             fault_id, impact = fault_capability.inject_fault(
                 request.vehicle_id, request.fault, request.params
             )
+            now = current_time()
+            item = _evaluate(service, request.vehicle_id, as_of=now)
             return schemas.FaultInjectionOutput(
                 fault_id=fault_id,
                 vehicle_id=request.vehicle_id,
                 fault=request.fault,
                 expected_quality_impact=impact,
                 data_quality=_quality_output(
-                    service.list_vehicles(as_of=current_time(), limit=1)[0].data_quality,
-                    as_of=current_time(),
-                    start=service.list_vehicles(as_of=current_time(), limit=1)[0]
-                    .points[0]
-                    .device_time,
-                    end=service.list_vehicles(as_of=current_time(), limit=1)[0].latest.device_time,
+                    item.data_quality,
+                    as_of=now,
+                    start=item.points[0].device_time,
+                    end=item.latest.device_time,
                 ),
             )
 
@@ -540,15 +596,16 @@ def create_server(
             cleared = fault_capability.reset_simulator(
                 fault=request.fault, vehicle_id=request.vehicle_id
             )
-            representative = service.list_vehicles(as_of=current_time(), limit=1)[0]
+            now = current_time()
+            fleet = service.evaluate_fleet(as_of=now)
             return schemas.ResetSimulatorOutput(
                 reset=True,
                 cleared_faults=cleared,
                 data_quality=_quality_output(
-                    representative.data_quality,
-                    as_of=current_time(),
-                    start=representative.points[0].device_time,
-                    end=representative.latest.device_time,
+                    fleet.data_quality,
+                    as_of=now,
+                    start=min(item.points[0].device_time for item in fleet.vehicles),
+                    end=max(item.latest.device_time for item in fleet.vehicles),
                 ),
             )
 

@@ -2,7 +2,7 @@
 
 import pytest
 
-from telematics.models.quality import CheckResult, Verdict
+from telematics.models.quality import CheckResult, Verdict, worst_verdict
 from telematics.quality.scoring import V0_1_WEIGHTS, score_checks
 
 
@@ -58,3 +58,19 @@ def test_full_weighted_score_is_capped_by_worst_verdict() -> None:
     )
 
     assert score_checks(results) == 0.39
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("verdicts", "expected"),
+    [
+        ((), Verdict.PASS),
+        ((Verdict.PASS,), Verdict.PASS),
+        ((Verdict.WARN, Verdict.PASS), Verdict.WARN),
+        ((Verdict.PASS, Verdict.BLOCK, Verdict.WARN), Verdict.BLOCK),
+    ],
+)
+def test_worst_verdict_uses_severity_order(
+    verdicts: tuple[Verdict, ...], expected: Verdict
+) -> None:
+    assert worst_verdict(verdicts) is expected

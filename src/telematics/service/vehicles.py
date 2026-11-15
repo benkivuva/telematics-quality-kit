@@ -1,6 +1,6 @@
 """Vehicle queries and full quality assembly, independent of MCP and I/O."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import pairwise
@@ -16,7 +16,7 @@ from telematics.config import (
     IgnitionConfig,
     PlausibilityConfig,
 )
-from telematics.models.quality import CheckResult, Verdict
+from telematics.models.quality import CheckResult, Verdict, worst_verdict
 from telematics.models.telemetry import TelemetryPoint
 from telematics.quality.caveats import caveat_for
 from telematics.quality.drift import DriftCheck
@@ -57,6 +57,8 @@ class DataQuality:
     age_seconds: int
     checks: tuple[CheckResult, ...]
     withheld: tuple[str, ...]
+    blocked_vehicles: tuple[str, ...] = ()
+    blocked_vehicle_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +66,14 @@ class VehicleSummary:
     vehicle_id: str
     latest: TelemetryPoint
     points: tuple[TelemetryPoint, ...]
+    data_quality: DataQuality
+
+
+@dataclass(frozen=True, slots=True)
+class FleetSummary:
+    """One fleet evaluation: every vehicle and the fleet-level trust signal."""
+
+    vehicles: tuple[VehicleSummary, ...]
     data_quality: DataQuality
 
 
@@ -76,6 +86,71 @@ def _distance_km(points: tuple[TelemetryPoint, ...]) -> float:
         value = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
         distance += 6371 * 2 * asin(sqrt(value))
     return distance
+
+
+def _fleet_caveats(summaries: Sequence[VehicleSummary]) -> tuple[str, ...]:
+    blocked_count = sum(1 for summary in summaries if summary.data_quality.verdict is Verdict.BLOCK)
+    caveats: list[str] = []
+    if blocked_count:
+        caveats.append(
+            f"{blocked_count} of {len(summaries)} vehicles are BLOCK; "
+            "fleet result is not usable for decisions."
+        )
+    for level in (Verdict.BLOCK, Verdict.WARN):
+        entries = [
+            f"{summary.vehicle_id}: {caveat}"
+            for summary in summaries
+            if summary.data_quality.verdict is level
+            for caveat in summary.data_quality.caveats
+        ]
+        caveats.extend(entries[:5])
+        if len(entries) > 5:
+            caveats.append(f"and {len(entries) - 5} more {level.value} caveats")
+    if blocked_count:
+        caveats.append(
+            "fleet trust score is an average; one blocked vehicle still blocks the fleet."
+        )
+    return tuple(caveats)
+
+
+def fleet_data_quality(summaries: Sequence[VehicleSummary]) -> DataQuality:
+    """Build the fleet trust signal from the worst vehicle, never the first."""
+    if not summaries:
+        raise ValueError("no vehicles")
+    verdict = worst_verdict(summary.data_quality.verdict for summary in summaries)
+    trust_score = sum(summary.data_quality.trust_score for summary in summaries) / len(summaries)
+    blocked = tuple(
+        sorted(
+            summary.vehicle_id
+            for summary in summaries
+            if summary.data_quality.verdict is Verdict.BLOCK
+        )
+    )
+    withheld = tuple(
+        sorted(
+            {
+                field
+                for summary in summaries
+                if summary.data_quality.verdict is Verdict.BLOCK
+                for field in summary.data_quality.withheld
+            }
+        )
+    )
+    return DataQuality(
+        verdict=verdict,
+        label=_LABELS[verdict],
+        symbol=_SYMBOLS[verdict],
+        trust_score=trust_score,
+        usable_for_decision=verdict is not Verdict.BLOCK,
+        caveats=_fleet_caveats(summaries),
+        check_name="fleet",
+        check_score=trust_score,
+        age_seconds=max(summary.data_quality.age_seconds for summary in summaries),
+        checks=(),
+        withheld=withheld,
+        blocked_vehicles=blocked[:5],
+        blocked_vehicle_count=len(blocked),
+    )
 
 
 class VehicleService:
@@ -128,10 +203,8 @@ class VehicleService:
             self._plausibility.evaluate(ordered, as_of=as_of, max_speed_kph=max_speed),
             self._fuel.evaluate(ordered, distance_km=_distance_km(ordered)),
         )
-        verdict = max(
-            (check.verdict for check in checks), key=lambda value: list(Verdict).index(value)
-        )
-        freshness = checks[0]
+        verdict = worst_verdict(check.verdict for check in checks)
+        freshness = next(check for check in checks if check.name == "freshness")
         age = int(freshness.metric["age_seconds"])
         caveats = tuple(caveat for check in checks if (caveat := caveat_for(check)) is not None)
         withheld: tuple[str, ...] = (
@@ -156,6 +229,8 @@ class VehicleService:
             age_seconds=age,
             checks=checks,
             withheld=withheld,
+            blocked_vehicles=(),
+            blocked_vehicle_count=0,
         )
         return VehicleSummary(vehicle_id, ordered[-1], ordered, quality)
 
@@ -176,6 +251,20 @@ class VehicleService:
     def list_vehicle_ids(self) -> tuple[str, ...]:
         return self._backend.list_vehicle_ids()
 
+    def evaluate_fleet(
+        self,
+        *,
+        as_of: datetime,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> FleetSummary:
+        """Evaluate every vehicle once and assemble the fleet trust signal."""
+        vehicles = tuple(
+            self.evaluate_vehicle(vehicle_id, as_of=as_of, start=start, end=end)
+            for vehicle_id in self.list_vehicle_ids()
+        )
+        return FleetSummary(vehicles, fleet_data_quality(vehicles))
+
     def get_points(self, vehicle_id: str) -> tuple[TelemetryPoint, ...]:
         return self._backend.get_points(vehicle_id)
 
@@ -186,9 +275,4 @@ class VehicleService:
         return cast(FaultOperations, capability_method())
 
     def fleet_trust_score(self, *, as_of: datetime) -> float:
-        summaries = self.list_vehicles(as_of=as_of, limit=200)
-        return (
-            sum(item.data_quality.trust_score for item in summaries) / len(summaries)
-            if summaries
-            else 1.0
-        )
+        return self.evaluate_fleet(as_of=as_of).data_quality.trust_score

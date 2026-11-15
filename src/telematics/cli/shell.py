@@ -7,10 +7,11 @@ import shlex
 import sys
 from collections import Counter
 from datetime import datetime, timedelta
-from typing import Any, TextIO
+from typing import Any, TextIO, get_args
 
 from telematics.cli.formatting import format_sim_time, json_line, render_verdict
 from telematics.cli.session import AttachedSession, EmbeddedSession
+from telematics.mcp.schemas import FaultName
 from telematics.models.quality import Verdict
 
 _ALIASES = {
@@ -23,6 +24,7 @@ _ALIASES = {
     "fuel-spike": "fuel_sensor_spike",
     "burst": "buffered_burst",
 }
+_FAULTS = frozenset(get_args(FaultName))
 _FRESHNESS_LABELS = {Verdict.PASS: "Fresh", Verdict.WARN: "Aging", Verdict.BLOCK: "Stale"}
 _CHECK_ORDER = {Verdict.PASS: 0, Verdict.WARN: 1, Verdict.BLOCK: 2}
 
@@ -56,7 +58,7 @@ class Shell(cmd.Cmd):
         self.failed = False
         self.failure_message = ""
         self.last_result: dict[str, Any] | None = None
-        self._previous_verdicts: dict[str, str] = {}
+        self._previous_all_blocked: bool | None = None
 
     def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
         try:
@@ -99,14 +101,21 @@ class Shell(cmd.Cmd):
     def _print_fleet_summary(self, result: dict[str, Any]) -> None:
         """Print the one-line fleet summary and watch for a fleet-wide flip."""
         vehicles = result.get("vehicles", [])
-        counts = Counter(item["data_quality"]["verdict"] for item in vehicles)
+        vehicle_count = int(result.get("vehicle_count", len(vehicles)))
+        counts = result.get("verdict_counts")
+        if counts is None:
+            counts = Counter(item["data_quality"]["verdict"] for item in vehicles)
         score = float(result.get("fleet_trust_score", 1.0))
         self._write(
-            f"{len(vehicles)} vehicles · fleet trust {score:.2f} · "
-            f"PASS {counts['PASS']} WARN {counts['WARN']} BLOCK {counts['BLOCK']}"
+            f"{vehicle_count} vehicles · fleet trust {score:.2f} · "
+            f"PASS {counts.get('PASS', 0)} WARN {counts.get('WARN', 0)} "
+            f"BLOCK {counts.get('BLOCK', 0)}"
             f"{self._sim_time_suffix(result)}"
         )
-        self._track_fleet_verdicts(vehicles)
+        self._track_fleet_verdicts(
+            vehicles,
+            all_blocked=vehicle_count > 0 and counts.get("BLOCK", 0) == vehicle_count,
+        )
 
     def _sim_time_suffix(self, result: dict[str, Any]) -> str:
         """Return the fleet's evaluation time in East Africa Time."""
@@ -118,33 +127,70 @@ class Shell(cmd.Cmd):
             return ""
         return f" · sim time {format_sim_time(datetime.fromisoformat(as_of))}"
 
-    def _track_fleet_verdicts(self, vehicles: list[dict[str, Any]]) -> None:
-        """Warn when every listed vehicle flips to BLOCK in one step."""
-        current = {item["vehicle_id"]: item["data_quality"]["verdict"] for item in vehicles}
-        previous = self._previous_verdicts
-        if (
-            current
-            and all(verdict == "BLOCK" for verdict in current.values())
-            and previous
-            and not all(verdict == "BLOCK" for verdict in previous.values())
-        ):
+    def _track_fleet_verdicts(
+        self, vehicles: list[dict[str, Any]], *, all_blocked: bool | None = None
+    ) -> None:
+        """Warn when the fleet flips to BLOCK in one step."""
+        if all_blocked is None:
+            all_blocked = bool(vehicles) and all(
+                item["data_quality"]["verdict"] == "BLOCK" for item in vehicles
+            )
+        if all_blocked and self._previous_all_blocked is False:
             self._write("Warning: entire fleet changed verdict together — check the simulator.")
-        self._previous_verdicts = current
+        self._previous_all_blocked = all_blocked
 
     def do_ls(self, argument: str) -> None:
-        """List vehicles, worst quality first: ls [--limit N]."""
+        """List vehicles, worst quality first: ls [--worse-than V] [--limit N]."""
         try:
             tokens = shlex.split(argument)
+            unknown = [
+                token
+                for token in tokens
+                if token.startswith("--") and token not in {"--limit", "--worse-than"}
+            ]
+            if unknown:
+                raise ValueError(f"unknown option: {unknown[0]}")
+            if tokens.count("--limit") > 1 or tokens.count("--worse-than") > 1:
+                raise ValueError("options may appear only once")
             limit = int(tokens[tokens.index("--limit") + 1]) if "--limit" in tokens else 50
-            result = self._call("list_vehicles", {"limit": limit})
+            if not 1 <= limit <= 200:
+                raise ValueError("--limit must be between 1 and 200")
+            worse_than = Verdict.PASS
+            if "--worse-than" in tokens:
+                value = tokens[tokens.index("--worse-than") + 1].upper()
+                try:
+                    worse_than = Verdict(value)
+                except ValueError:
+                    raise ValueError("--worse-than must be PASS, WARN, or BLOCK") from None
         except (ValueError, IndexError) as exc:
-            self._fail(f"usage: ls [--limit 1..200] ({exc})")
+            self._fail(f"usage: ls [--worse-than PASS|WARN|BLOCK] [--limit 1..200] ({exc})")
             return
-        if result is None:
-            return
-        vehicles = result.get("vehicles", [])
-        vehicles.sort(key=lambda item: (item["data_quality"]["trust_score"], item["vehicle_id"]))
-        for item in vehicles:
+        vehicles: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            arguments: dict[str, Any] = {"limit": 200}
+            if cursor is not None:
+                arguments["cursor"] = cursor
+            result = self._call("list_vehicles", arguments)
+            if result is None:
+                return
+            vehicles.extend(result.get("vehicles", []))
+            cursor = result.get("next_cursor")
+            if cursor is None:
+                break
+        filtered = [
+            item
+            for item in vehicles
+            if Verdict(item["data_quality"]["verdict"]).severity >= worse_than.severity
+        ]
+        filtered.sort(
+            key=lambda item: (
+                -Verdict(item["data_quality"]["verdict"]).severity,
+                item["data_quality"]["trust_score"],
+                item["vehicle_id"],
+            )
+        )
+        for item in filtered[:limit]:
             quality = item["data_quality"]
             verdict = Verdict(quality["verdict"])
             self._write(
@@ -269,14 +315,36 @@ class Shell(cmd.Cmd):
         """Inject a simulator fault: inject FAULT VEHICLE [--severity LEVEL]."""
         try:
             tokens = shlex.split(argument)
-            fault, vehicle_id = tokens[0], tokens[1]
-            fault = _ALIASES.get(fault, fault)
-            severity = (
-                tokens[tokens.index("--severity") + 1] if "--severity" in tokens else "medium"
-            )
-            params: dict[str, str] = {"severity": severity}
-            if "--duration" in tokens:
-                params["duration"] = tokens[tokens.index("--duration") + 1]
+            if len(tokens) < 2:
+                raise ValueError("expected FAULT and VEHICLE_ID")
+            requested_fault, vehicle_id = tokens[0], tokens[1]
+            fault = _ALIASES.get(requested_fault, requested_fault)
+            if fault not in _FAULTS:
+                raise ValueError(f"unknown fault: {requested_fault}; expected a fault name")
+            severity = "medium"
+            params: dict[str, str] = {}
+            index = 2
+            while index < len(tokens):
+                option = tokens[index]
+                if option not in {"--severity", "--duration"}:
+                    raise ValueError(f"unknown option: {option}")
+                if index + 1 >= len(tokens):
+                    raise ValueError(f"missing value for {option}")
+                value = tokens[index + 1]
+                if option == "--severity":
+                    if value not in {"low", "medium", "high"}:
+                        raise ValueError("severity must be low, medium, or high")
+                    severity = value
+                else:
+                    _duration(value)
+                    params["duration"] = value
+                index += 2
+            params["severity"] = severity
+            if (
+                isinstance(self.session, EmbeddedSession)
+                and vehicle_id not in self.session.backend.list_vehicle_ids()
+            ):
+                raise ValueError(f"unknown vehicle: {vehicle_id}")
             result = self._call(
                 "inject_fault", {"vehicle_id": vehicle_id, "fault": fault, "params": params}
             )
@@ -305,6 +373,16 @@ class Shell(cmd.Cmd):
                 fault: str | None = None
             else:
                 fault = _ALIASES.get(requested_fault, requested_fault)
+                if fault not in _FAULTS:
+                    raise ValueError(
+                        f"unknown fault: {requested_fault}; expected a fault name or all"
+                    )
+            if (
+                vehicle_id is not None
+                and isinstance(self.session, EmbeddedSession)
+                and vehicle_id not in self.session.backend.list_vehicle_ids()
+            ):
+                raise ValueError(f"unknown vehicle: {vehicle_id}")
         except ValueError as exc:
             self._fail(f"usage: clear [FAULT|all] [VEHICLE_ID] ({exc})")
             return
@@ -336,6 +414,11 @@ class Shell(cmd.Cmd):
                 )
         else:
             self._write(f"cleared {cleared} simulator faults")
+        if cleared:
+            self._write(
+                "Note: cleared active faults, but historical bad points remain. "
+                "Use 'reset' to wipe the simulator history."
+            )
 
     def do_faults(self, _argument: str) -> None:
         """Show active embedded simulator fault IDs."""

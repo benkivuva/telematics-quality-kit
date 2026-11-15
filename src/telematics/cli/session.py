@@ -1,6 +1,7 @@
 """CLI sessions backed by an embedded MCP server or an attached MCP URL."""
 
 import asyncio
+import logging
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from typing import Any
@@ -24,6 +25,11 @@ ToolCall = Callable[[str, dict[str, Any]], dict[str, Any]]
 
 class MCPToolError(RuntimeError):
     """A connected MCP server rejected a tool request."""
+
+
+def _quiet_mcp_logs() -> None:
+    """Keep MCP INFO diagnostics out of normal CLI output."""
+    logging.getLogger("mcp").setLevel(logging.WARNING)
 
 
 def _root_exception_message(error: BaseException) -> str:
@@ -55,6 +61,7 @@ class EmbeddedSession:
         self.drift_config = drift_config
         self.clock_driver = SimulatorClockDriver(backend, speed=1.0)
         self.server = create_server(service, as_of=clock.now(), clock=clock)
+        _quiet_mcp_logs()
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Call the embedded server through the SDK's in-process client."""
@@ -81,6 +88,7 @@ class EmbeddedSession:
         self.service = service
         self.seed = seed
         self.server = create_server(service, as_of=self.clock.now(), clock=self.clock)
+        _quiet_mcp_logs()
         self.clock_driver.set_backend(backend)
 
 
@@ -90,6 +98,7 @@ class AttachedSession:
     def __init__(self, url: str, *, call_tool: ToolCall | None = None) -> None:
         self.url = url
         self._call_tool_override = call_tool
+        _quiet_mcp_logs()
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Invoke an MCP tool over Streamable HTTP."""
