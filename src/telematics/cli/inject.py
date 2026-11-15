@@ -19,6 +19,15 @@ _FAULT_ALIASES = {
     "fuel-spike": "fuel_sensor_spike",
     "burst": "buffered_burst",
 }
+_FAULTS = frozenset(_FAULT_ALIASES.values())
+
+
+def canonical_fault(value: str) -> str:
+    """Return the canonical fault name or raise for an unknown alias."""
+    fault = _FAULT_ALIASES.get(value, value)
+    if fault not in _FAULTS:
+        raise ValueError(f"unknown fault: {value}")
+    return fault
 
 
 def _root_exception_message(error: BaseException) -> str:

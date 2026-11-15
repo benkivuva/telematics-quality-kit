@@ -184,6 +184,30 @@ def test_inject_accepts_the_blackout_alias() -> None:
     assert client.calls[0][1]["fault"] == "rural_blackout"
 
 
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["inject", "nonsense", "--vehicle", "TRK-0001"], "unknown fault: nonsense"),
+        (
+            ["inject", "gps_drift", "--vehicle", "TRK-0001", "--duration", "0m"],
+            "duration must be positive",
+        ),
+        (
+            ["inject", "gps_drift", "--vehicle", "TRK-0001", "--duration", "tomorrow"],
+            "duration must look like 30s, 6m, or 1h",
+        ),
+    ],
+)
+def test_main_rejects_invalid_inject_inputs_before_contacting_a_server(
+    arguments: list[str], message: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli_main.main(arguments)
+
+    assert raised.value.code == 2
+    assert message in capsys.readouterr().err
+
+
 def test_main_dispatches_inject_wait_to_attached_session(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

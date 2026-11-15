@@ -315,14 +315,36 @@ class Shell(cmd.Cmd):
         """Inject a simulator fault: inject FAULT VEHICLE [--severity LEVEL]."""
         try:
             tokens = shlex.split(argument)
-            fault, vehicle_id = tokens[0], tokens[1]
-            fault = _ALIASES.get(fault, fault)
-            severity = (
-                tokens[tokens.index("--severity") + 1] if "--severity" in tokens else "medium"
-            )
-            params: dict[str, str] = {"severity": severity}
-            if "--duration" in tokens:
-                params["duration"] = tokens[tokens.index("--duration") + 1]
+            if len(tokens) < 2:
+                raise ValueError("expected FAULT and VEHICLE_ID")
+            requested_fault, vehicle_id = tokens[0], tokens[1]
+            fault = _ALIASES.get(requested_fault, requested_fault)
+            if fault not in _FAULTS:
+                raise ValueError(f"unknown fault: {requested_fault}; expected a fault name")
+            severity = "medium"
+            params: dict[str, str] = {}
+            index = 2
+            while index < len(tokens):
+                option = tokens[index]
+                if option not in {"--severity", "--duration"}:
+                    raise ValueError(f"unknown option: {option}")
+                if index + 1 >= len(tokens):
+                    raise ValueError(f"missing value for {option}")
+                value = tokens[index + 1]
+                if option == "--severity":
+                    if value not in {"low", "medium", "high"}:
+                        raise ValueError("severity must be low, medium, or high")
+                    severity = value
+                else:
+                    _duration(value)
+                    params["duration"] = value
+                index += 2
+            params["severity"] = severity
+            if (
+                isinstance(self.session, EmbeddedSession)
+                and vehicle_id not in self.session.backend.list_vehicle_ids()
+            ):
+                raise ValueError(f"unknown vehicle: {vehicle_id}")
             result = self._call(
                 "inject_fault", {"vehicle_id": vehicle_id, "fault": fault, "params": params}
             )

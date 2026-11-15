@@ -13,7 +13,7 @@ from telematics.backends.simulator import SimulatorBackend
 from telematics.cli.doctor import doctor as run_doctor
 from telematics.cli.formatting import configure_utf8_stdout
 from telematics.cli.init import init_command
-from telematics.cli.inject import inject_and_wait
+from telematics.cli.inject import canonical_fault, inject_and_wait
 from telematics.cli.session import AttachedSession, EmbeddedSession, create_embedded_session
 from telematics.cli.shell import Shell, execute_command, run_script
 from telematics.cli.stream import add_stream_parser
@@ -139,6 +139,20 @@ def _positive_detail(value: str) -> int:
     if not 1 <= detail <= 200:
         raise argparse.ArgumentTypeError("detail must be between 1 and 200")
     return detail
+
+
+def _inject_fault(value: str) -> str:
+    """Validate a fault name or alias before any network call."""
+    try:
+        return canonical_fault(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _inject_duration(value: str) -> str:
+    """Validate the textual duration while preserving its original form."""
+    _duration_seconds(value)
+    return value
 
 
 def _iso_date(value: str) -> date:
@@ -412,10 +426,10 @@ def main(argv: list[str] | None = None) -> int:
     shell_mode.add_argument("-c", dest="shell_command")
     shell_mode.add_argument("--script")
     inject = commands.add_parser("inject", help="inject a fault into an attached simulator")
-    inject.add_argument("fault")
+    inject.add_argument("fault", type=_inject_fault)
     inject.add_argument("--vehicle", required=True)
     inject.add_argument("--severity", choices=("low", "medium", "high"), default="medium")
-    inject.add_argument("--duration")
+    inject.add_argument("--duration", type=_inject_duration)
     inject.add_argument("--url", default="http://127.0.0.1:8000/mcp")
     inject.add_argument("--wait", nargs="?", const="30s", type=_duration_seconds)
     inject.add_argument("--expect", choices=("PASS", "WARN", "BLOCK"), default="BLOCK")

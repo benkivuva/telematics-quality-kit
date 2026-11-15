@@ -271,6 +271,39 @@ def test_inject_prints_the_fleet_summary() -> None:
     assert "2 vehicles · fleet trust" in text
 
 
+def test_inject_rejects_an_unknown_fault_before_calling_mcp() -> None:
+    output = StringIO()
+    session = create_embedded_session(vehicles=1, seed=3, start=_START)
+    shell = Shell(session, stdout=output)
+
+    shell.onecmd("inject nonsense TRK-0001")
+
+    text = output.getvalue()
+    assert "unknown fault: nonsense" in text
+    assert "validation error" not in text.lower()
+    assert session.backend._active_faults == {}
+
+
+def test_inject_rejects_an_unknown_vehicle_before_calling_mcp() -> None:
+    output = StringIO()
+    shell = Shell(create_embedded_session(vehicles=1, seed=3, start=_START), stdout=output)
+
+    shell.onecmd("inject gps_drift FAKE-9999")
+
+    text = output.getvalue()
+    assert "unknown vehicle: FAKE-9999" in text
+    assert "Error executing tool" not in text
+
+
+def test_inject_rejects_an_invalid_severity() -> None:
+    output = StringIO()
+    shell = Shell(create_embedded_session(vehicles=1, seed=3, start=_START), stdout=output)
+
+    shell.onecmd("inject gps_drift TRK-0001 --severity bogus")
+
+    assert "severity must be low, medium, or high" in output.getvalue()
+
+
 def test_faults_lists_severity() -> None:
     output = StringIO()
     shell = Shell(create_embedded_session(vehicles=1, seed=3, start=_START), stdout=output)
