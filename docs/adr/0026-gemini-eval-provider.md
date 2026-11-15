@@ -1,4 +1,4 @@
-# ADR 0021: Use Gemini for the optional model eval
+# ADR 0026: Use Gemini for the optional model eval
 
 - Status: Accepted
 - Contract: `ARCHITECTURE.md` §15

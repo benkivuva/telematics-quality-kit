@@ -58,7 +58,7 @@ def _demo(*, vehicles: int, seed: int, drift_config: DriftConfig) -> int:
         drift_config=drift_config,
     )
     after = stale_service.list_vehicles(as_of=as_of)
-    print("Phase 2 telematics demo — baseline")
+    print("telematics demo - baseline")
     print("vehicle      verdict  trust score")
     for vehicle in baseline:
         print(
