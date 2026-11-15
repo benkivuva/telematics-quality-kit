@@ -504,6 +504,45 @@ The report size warning and deterministic output checks are exercised by `uv run
 
 ## MCP tools, resources, and prompts
 
+### Why use the MCP server?
+
+If you build an AI assistant on top of raw telematics data, the AI will eventually hallucinate. If a truck goes offline for 20 minutes, a naive AI will still confidently tell the user where the truck is based on the last known coordinates.
+
+This MCP server prevents that. It attaches a trust verdict (`PASS`, `WARN`, `BLOCK`) and plain-English caveats to every response. When you connect an AI client, you will see it automatically refuse to answer questions if the data is stale or broken, or proactively warn the user that the data cannot be trusted.
+
+### Quick Start (Claude Desktop via stdio)
+
+The easiest way to use this with an AI is via the `stdio` transport. This allows Claude Desktop to launch the MCP server automatically in the background. You do not need to open a second terminal.
+
+Add this to your `claude_desktop_config.json` (replace the path with the absolute path to your checkout):
+
+```json
+{
+  "mcpServers": {
+    "telematics-quality-kit": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/absolute/path/to/telematics-quality-kit",
+        "telematics",
+        "serve",
+        "--transport",
+        "stdio"
+      ]
+    }
+  }
+}
+```
+
+Once configured, restart Claude Desktop. You can now ask it questions like:
+
+"Give me a health briefing of the fleet. Which vehicles can I trust right now?"
+
+"Simulate a rural blackout on TRK-0001, then tell me where that vehicle is."
+
+"Show last week's trips for LRY-0003 and tell me what you could not verify."
+
 `telematics serve` exposes 11 v0.1 tools over either stdio or Streamable HTTP. `inject_fault` and `reset_simulator` are registered only when the active backend exposes the simulator fault capability; they are not general device-control commands. The tool count and schemas are checked by `uv run pytest tests/integration/test_mcp_surface.py`.
 
 | Tool | Purpose |
