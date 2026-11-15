@@ -566,26 +566,7 @@ The server also exposes:
 - Resources: `quality://checks` and `fleet://profiles`.
 - Prompts: `fleet_health_briefing`, `investigate_vehicle`, and `fault_drill`.
 
-For an MCP client supporting stdio, configure its server entry with the command below and replace the directory with your checkout's absolute path. A stdio client launches `telematics serve` as a child process, so there is no second terminal to start and keep open. `stdout` is reserved for MCP protocol messages; diagnostics go to `stderr`.
-
-```json
-{
-  "mcpServers": {
-    "telematics-quality-kit": {
-      "command": "uv",
-      "args": [
-        "run",
-        "--directory",
-        "/absolute/path/to/telematics-quality-kit",
-        "telematics",
-        "serve",
-        "--transport",
-        "stdio"
-      ]
-    }
-  }
-}
-```
+A stdio client launches `telematics serve` as a child process, so there is no second terminal to start and keep open. `stdout` is reserved for MCP protocol messages; diagnostics go to `stderr`.
 
 On Windows, use an absolute path and JSON-escape each backslash (or use forward slashes), for example:
 
