@@ -21,3 +21,11 @@ def test_readme_tables_use_plain_ascii_apostrophes() -> None:
 
     assert "’" not in text
     assert "â€™" not in text
+
+
+@pytest.mark.unit
+def test_readme_has_no_double_encoded_utf8() -> None:
+    text = README.read_text(encoding="utf-8")
+
+    for marker in ("â", "Ã"):
+        assert marker not in text, f"README contains double-encoded UTF-8 marker {marker!r}"
