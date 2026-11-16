@@ -14,7 +14,7 @@ from telematics.eval.harness import (
     run_deterministic_eval,
     run_model_eval,
 )
-from telematics.eval.manual import run_manual_eval
+from telematics.eval.manual import render_manual_results, run_manual_eval
 
 
 def test_question_set_hash_is_a_sha256_digest() -> None:
@@ -46,6 +46,24 @@ def test_manual_eval_counts_an_eof_answer_as_a_rubric_fail() -> None:
     assert result.total == 3
     assert result.passed == 0
     assert any("No answer received" in line for line in written)
+
+
+def test_manual_evidence_records_prompts_answers_and_score() -> None:
+    answers = iter(["yes", "no", "y"])
+
+    result = run_manual_eval(
+        run_deterministic_eval(seed=42),
+        input_fn=lambda _prompt="": next(answers),
+        write=lambda _line="": None,
+    )
+    markdown = render_manual_results(result, run_date=date(2026, 1, 2))
+
+    assert "Graded by a human. This does not satisfy the Phase 7 model-run gate." in markdown
+    assert "Date: 2026-01-02" in markdown
+    assert "Question-set SHA-256" in markdown
+    assert "| yes | PASS |" in markdown
+    assert "| no | FAIL |" in markdown
+    assert "Final score: **2/3 rubric passes**" in markdown
 
 
 def test_gemini_rest_request_uses_fixed_https_host_and_key_header(monkeypatch) -> None:

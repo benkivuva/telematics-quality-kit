@@ -1,6 +1,7 @@
 """Command-line dispatch for the embedded vertical slice."""
 
 import argparse
+import logging
 import math
 import shlex
 import sys
@@ -26,7 +27,7 @@ from telematics.eval.harness import (
     run_deterministic_eval,
     run_model_eval,
 )
-from telematics.eval.manual import run_manual_eval
+from telematics.eval.manual import render_manual_results, run_manual_eval
 from telematics.mcp.server import create_server
 from telematics.report.builder import (
     FaultSpec,
@@ -39,6 +40,7 @@ from telematics.service.vehicles import VehicleService
 from telematics.simulator.realtime import SimulatorClockDriver
 
 _SIMULATION_START = datetime(2024, 4, 5, 6, 7, 8, tzinfo=UTC)
+_LOOPBACK_HOST = "127.0.0.1"
 
 
 def _demo(*, vehicles: int, seed: int, drift_config: DriftConfig) -> int:
@@ -253,8 +255,8 @@ def _report(args: argparse.Namespace, *, drift_config: DriftConfig) -> int:
 
 def _eval(args: argparse.Namespace) -> int:
     """Run the no-key contract eval and, only when requested, the model layer."""
-    if args.manual and (args.model is not None or args.out is not None):
-        print("--manual cannot be combined with --model or --out", file=sys.stderr)
+    if args.manual and args.model is not None:
+        print("--manual cannot be combined with --model", file=sys.stderr)
         return 2
     if (args.out is not None or args.model is not None) and args.run_date is None:
         print("writing eval evidence requires --date YYYY-MM-DD", file=sys.stderr)
@@ -276,6 +278,19 @@ def _eval(args: argparse.Namespace) -> int:
         manual = run_manual_eval(result)
         print(f"\nManual eval: {manual.passed}/{manual.total} rubric passes")
         print(f"Question-set SHA-256: {manual.question_set_sha256}")
+        if args.out is not None:
+            assert args.run_date is not None
+            output = Path(args.out)
+            try:
+                output.write_text(
+                    render_manual_results(manual, run_date=args.run_date),
+                    encoding="utf-8",
+                    newline="\n",
+                )
+            except OSError as exc:
+                print(f"cannot write manual eval results {output}: {exc}", file=sys.stderr)
+                return 4
+            print(f"Manual eval results written to {output}")
         return 0
     if args.model is None:
         if args.out is not None:
@@ -388,6 +403,11 @@ def _serve(
     clock_thread.start()
     try:
         if transport == "stdio":
+            logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+            logging.getLogger("telematics").info(
+                "serving %d vehicles over stdio; protocol on stdout, logs on stderr",
+                vehicles,
+            )
             server.run(transport="stdio")
         else:
             server.run(transport="streamable-http", host=host, port=port)
@@ -412,7 +432,11 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument(
         "--transport", choices=("stdio", "streamable-http"), default="streamable-http"
     )
-    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument(
+        "--host",
+        default=_LOOPBACK_HOST,
+        help="HTTP bind host, default 127.0.0.1 (loopback); pass --host to override",
+    )
     serve.add_argument("--port", type=_port_number, default=8000)
     serve.add_argument("--speed", type=_parse_speed, default=1.0)
     shell_parser = commands.add_parser("shell", help="open the developer command shell")

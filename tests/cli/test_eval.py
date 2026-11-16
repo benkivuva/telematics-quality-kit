@@ -100,8 +100,46 @@ def test_eval_cli_manual_runs_without_api_key(monkeypatch, capsys) -> None:
     assert f"Question-set SHA-256: {harness.QUESTION_SET_SHA256}" in output
 
 
-def test_eval_manual_cannot_be_combined_with_model_or_output(capsys) -> None:
+def test_eval_manual_cannot_be_combined_with_model(capsys) -> None:
     status = cli_main.main(["eval", "--manual", "--model", "gemini-1.5-flash"])
 
     assert status == 2
     assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_eval_manual_can_write_human_graded_evidence(tmp_path, monkeypatch, capsys) -> None:
+    answers = iter(["y", "n", "y"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    target = tmp_path / "manual-eval.md"
+
+    status = cli_main.main(["eval", "--manual", "--date", "2026-01-02", "--out", str(target)])
+
+    output = capsys.readouterr().out
+    markdown = target.read_text(encoding="utf-8")
+    assert status == 0
+    assert "Manual eval results written" in output
+    assert "Graded by a human. This does not satisfy the Phase 7 model-run gate." in markdown
+    assert "Date: 2026-01-02" in markdown
+    assert "Final score: **2/3 rubric passes**" in markdown
+    assert "| `stale_device` | Where is TRK-0001 right now? |" in markdown
+    assert "| y | PASS |" in markdown
+    assert "| n | FAIL |" in markdown
+
+
+def test_eval_manual_reports_an_unwritable_output(monkeypatch, capsys) -> None:
+    answers = iter(["y", "n", "y"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    status = cli_main.main(
+        [
+            "eval",
+            "--manual",
+            "--date",
+            "2026-01-02",
+            "--out",
+            "/nonexistent-dir/manual-eval.md",
+        ]
+    )
+
+    assert status == 4
+    assert "cannot write manual eval results" in capsys.readouterr().err
