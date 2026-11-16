@@ -11,8 +11,20 @@ _INDEX_HEADING = "## 20. Decision log (ADR index)"
 _NEXT_HEADING = "## 21. Sources and open verification items"
 
 
+def _architecture_text() -> str:
+    """Read ``ARCHITECTURE.md``, or skip when it is not checked out.
+
+    ``ARCHITECTURE.md`` is local-only (``.git/info/exclude``), so a CI checkout
+    has no copy to compare the ADR files against.
+    """
+    path = _ROOT / "ARCHITECTURE.md"
+    if not path.exists():
+        pytest.skip("ARCHITECTURE.md is local-only and not present in CI")
+    return path.read_text(encoding="utf-8")
+
+
 def _indexed_numbers() -> list[int]:
-    text = (_ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    text = _architecture_text()
     section = text.split(_INDEX_HEADING, 1)[1].split(_NEXT_HEADING, 1)[0]
     return [int(number) for number in re.findall(r"^\| (\d{4}) \|", section, re.MULTILINE)]
 
