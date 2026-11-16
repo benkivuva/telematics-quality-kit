@@ -181,7 +181,7 @@ The score weights and caps are asserted by `uv run pytest tests/unit/test_scorin
 
 | Verdict | Trust label | Meaning |
 | --- | --- | --- |
-| `PASS` âœ“ | **trust it** | Values are usable for decisions under the configured heuristics. |
+| `PASS` ✓ | **trust it** | Values are usable for decisions under the configured heuristics. |
 | `WARN` ⚠ | **be careful** | Values are returned with caveats. |
 | `BLOCK` ⛔ | **don't trust it** | A BLOCK is a normal result, not a tool error. Last-known location values may still be present and clearly labelled, but `usable_for_decision` is `false`; affected derived values are withheld and listed. |
 
@@ -246,9 +246,26 @@ To generate the API-key-free evidence page, supply the date of that run:
 uv run telematics eval --date YYYY-MM-DD --out docs/eval-results.md
 ```
 
+To grade the fixed question set yourself without an API key, run the interactive
+manual rubric:
+
+```bash
+uv run telematics eval --manual
+```
+
+Combine `--manual` with `--date` and `--out` to save the raw prompts, your `y`/`n`
+answers, and the final rubric score as Markdown evidence:
+
+```bash
+uv run telematics eval --manual --date YYYY-MM-DD --out docs/manual-eval.md
+```
+
+The saved manual file is labelled **"Graded by a human. This does not satisfy the Phase 7 model-run gate."**
+It records human judgement; it is not a substitute for the model-run evidence.
+
 The fixed seed defaults to `42`. To select another seed or output path, use
-`--seed` and `--out`. The deterministic layer is part of CI; the model layer is
-a manual step and is never run by CI.
+`--seed` and `--out`. The deterministic layer is part of CI; the model and manual
+layers are manual steps and are never run by CI.
 
 ### `demo`
 
@@ -279,7 +296,7 @@ Options:
 - `--profile-mix trk=40,lry=30,car=15,pik=15`: profile percentages; values must be positive and sum to 100. Omit a profile to exclude it.
 - `--transport streamable-http|stdio`: transport, default `streamable-http`.
 - `--host HOST`: HTTP bind host, default `127.0.0.1` (loopback).
-- `--port PORT`: HTTP port, default `8000`, valid range 1â€“65,535.
+- `--port PORT`: HTTP port, default `8000`, valid range 1–65,535.
 - `--speed Nx`: simulated clock rate, default `1x`. For example, `60x` advances roughly an hour of simulated time per minute of elapsed time.
 
 Examples:
@@ -321,17 +338,17 @@ Available shell commands:
 | Command | Behavior |
 | --- | --- |
 | `fleet` | Show vehicle count, fleet trust score, and PASS/WARN/BLOCK counts. |
-| `ls [--limit N]` | List vehicles, lower trust scores first; default limit 50. |
+| `ls [--worse-than PASS\|WARN\|BLOCK] [--limit N]` | List vehicles, lower trust scores first; default limit 50. `--worse-than` keeps only vehicles at or worse than the given verdict, and the filter is applied before `--limit`. |
 | `get VEHICLE_ID` | Show the last location, age, trust signal, and caveats. |
 | `report [VEHICLE_ID] [--verbose]` | Print a structured quality report for a vehicle or the fleet. `--verbose` includes check metrics. |
 | `explain VEHICLE_ID CHECK` | Show a check's verdict, score, and metrics. Checks: `freshness`, `drift`, `duplicates`, `ignition`, `plausibility`, `fuel`. |
 | `inject FAULT VEHICLE_ID [--severity low\|medium\|high] [--duration 15m]` | Inject a reversible fault into an embedded simulator. |
-| `clear` | Clear simulator faults and restore seeded frames. |
+| `clear` | Clear active simulator faults and restore seeded frames for future ticks. Historical points that already recorded a fault stay in the simulator history; use `reset` to wipe that history. |
 | `faults` | List active fault IDs in embedded mode. |
 | `advance DURATION` | Advance embedded simulated time by a duration such as `30s`, `6m`, or `1h`. |
 | `pause` / `resume` | Pause or resume automatic simulator time in embedded mode. Explicit `advance` still works while paused. |
 | `speed [Nx]` | Show or set the automatic simulator clock rate, such as `speed 10x`. |
-| `reset` | Clear active simulator faults and restore the seeded frames. |
+| `reset` | Clear active simulator faults and wipe the simulator history, then restore the seeded frames. |
 | `seed INTEGER` | Rebuild the embedded fleet using a new seed. |
 | `call TOOL [JSON_ARGUMENTS]` | Call a public MCP tool and print its structured response. |
 | `tools` | List tools exposed by the active MCP server. |
@@ -651,6 +668,12 @@ uv run pytest -m property
 # CLI tests
 uv run pytest tests/cli
 
+# Per-package coverage gates (85% each: codecs, quality, service, mcp)
+make coverage
+
+# End-to-end CLI QA suite (Linux: bash /dev/tcp and GNU timeout)
+./e2e_test.sh
+
 # Lint, formatting, typing
 uv run ruff check .
 uv run ruff format --check .
@@ -704,7 +727,7 @@ tests/
 - **Deterministic time and randomness:** fixed seeds and injected clocks make simulations, tests, and reports repeatable. The long-running `stream` command sleeps to drive a live display; tests do not rely on wall-clock sleeps.
 - **Bounded event consumers:** event tap subscriptions have bounded queues; slow consumers do not block the ingestion pipeline and can miss older queued events.
 - **Heuristic checks:** scores and thresholds describe configurable defaults. They are not a guarantee that a value is correct.
-- **v0.1 scope:** current commands are listed in the [command reference](#command-reference). Features marked v0.2 in `ARCHITECTURE.md`â€”including a TCP listener, real Traccar backend, capture/replay, dashboard, metrics intervals, and external device simulatorâ€”are not available in this release.
+- **v0.1 scope:** current commands are listed in the [command reference](#command-reference). Features marked v0.2 in `ARCHITECTURE.md`—including a TCP listener, real Traccar backend, capture/replay, dashboard, metrics intervals, and external device simulator—are not available in this release.
 
 ## License
 

@@ -38,6 +38,25 @@ def _root_exception_message(error: BaseException) -> str:
     return str(error)
 
 
+_TRANSPORT_ERRORS = (ConnectionError, OSError, TimeoutError)
+
+
+def _is_transport_error(error: BaseException) -> bool:
+    """Return true when an error is, or only wraps, a transport failure."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, _TRANSPORT_ERRORS):
+            return True
+        if isinstance(current, BaseExceptionGroup):
+            return bool(current.exceptions) and all(
+                _is_transport_error(child) for child in current.exceptions
+            )
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class EmbeddedSession:
     """A deterministic simulator session using the public in-process MCP tools."""
 
@@ -108,15 +127,9 @@ class AttachedSession:
             return asyncio.run(_call_http_server(self.url, name, arguments))
         except MCPToolError:
             raise
-        except (
-            ConnectionError,
-            OSError,
-            RuntimeError,
-            TimeoutError,
-            ValueError,
-            TypeError,
-            ExceptionGroup,
-        ) as exc:
+        except (ConnectionError, OSError, TimeoutError, ExceptionGroup) as exc:
+            if not _is_transport_error(exc):
+                raise
             raise ConnectionError(
                 f"cannot connect to MCP server at {self.url}: {_root_exception_message(exc)}"
             ) from None
@@ -125,15 +138,9 @@ class AttachedSession:
         """List tools through the attached server's MCP connection."""
         try:
             return asyncio.run(_list_http_tools(self.url))
-        except (
-            ConnectionError,
-            OSError,
-            RuntimeError,
-            TimeoutError,
-            ValueError,
-            TypeError,
-            ExceptionGroup,
-        ) as exc:
+        except (ConnectionError, OSError, TimeoutError, ExceptionGroup) as exc:
+            if not _is_transport_error(exc):
+                raise
             raise ConnectionError(
                 f"cannot connect to MCP server at {self.url}: {_root_exception_message(exc)}"
             ) from None

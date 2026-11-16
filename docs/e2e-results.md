@@ -1,14 +1,14 @@
 # End-to-end QA results — v0.1.4 release gate
 
-Date: 2026-11-15
-Branch: `feat/phase7-evidence-harness`
-Base commit: `047a2a4` (plus this pass's uncommitted fixes)
+Date: 2026-11-16
+Branch: `fix/v0.1.4-final-polish`
+Base commit: `c1c8f98` (plus this pass's uncommitted fixes)
 Environment: WSL Ubuntu, Python 3.12, `uv`, loopback-only MCP server
 
 ## Result
 
 ```
-PASS: 348 checks passed, 0 failed
+PASS: 353 checks passed, 0 failed
 ```
 
 The suite is `./e2e_test.sh` in the repository root. It reports each failing
@@ -19,14 +19,17 @@ Python traceback.
 Full test and lint results after the fixes:
 
 ```
-uv run pytest -q
-266 passed in 51.78s
+uv run pytest --cov=telematics.codecs --cov=telematics.quality \
+  --cov=telematics.service --cov=telematics.mcp --cov=telematics.eval \
+  --cov-report=term-missing -q
+284 passed in 357.96s (0:05:57)
+TOTAL  1298 statements, 97 missed, 93%
 
 uv run ruff check .
 All checks passed!
 
 uv run ruff format --check .
-137 files already formatted
+141 files already formatted
 
 uv run mypy src/telematics
 Success: no issues found in 52 source files
@@ -95,7 +98,8 @@ telematics serve --vehicles 20 --seed 9 --profile-mix trk=50,lry=50 \
 
 The suite then verifies:
 
-- `shell --attach <url> -c fleet` sees 20 healthy vehicles.
+- `shell --attach <url> -c fleet` sees the 20-vehicle fleet with a fleet-level
+  trust score and a `PASS`/`WARN`/`BLOCK` mix.
 - `tools` lists the full v0.1 surface, including `inject_fault` and
   `get_quality_report`.
 - `get` returns a vehicle location.
@@ -107,8 +111,8 @@ The suite then verifies:
 - `--duration` and fault aliases work.
 - An unreachable server returns status `3` with the `uv run telematics serve`
   hint.
-- The server log contains no traceback, and the process group is terminated on
-  exit.
+- The server log contains no traceback, and the server PID that was started
+  directly is terminated on exit.
 
 The stdio transport is also checked: `serve --transport stdio` exits cleanly
 on EOF with status `0`.
@@ -134,8 +138,11 @@ on EOF with status `0`.
 - `--date` + `--out` writes Markdown evidence with the date and seed.
 - `--manual` with `y/n/y` answers reports `2/3 rubric passes` and the
   question-set SHA-256.
+- `--manual` with `--date` and `--out` writes a Markdown transcript containing
+  the raw prompts, the `y`/`n` answers, the human-grading header, and the final
+  `2/3 rubric passes` score.
+- `--manual` with `--model` is rejected.
 - `--out` without `--date` is rejected.
-- `--manual` with `--out` is rejected.
 - A malformed date is rejected.
 - `--model` without an API key returns status `2` with the documented message.
 - `--model` without `--date` is rejected before any model call.
@@ -231,14 +238,36 @@ The previously fixed issues remain covered by the suite:
 - MCP `INFO` logs are suppressed in CLI sessions.
 - `clear all` prints the history warning only when faults were cleared.
 
+### Two assertions corrected in the final polish pass
+
+Both were test-harness assumptions, not product defects:
+
+1. **The `stream` and stdio checks had an 8-second startup budget.**
+   `timeout -s INT 8` is meant to interrupt the stream loop, but on a machine
+   under load a cold `uv run` import was still inside Pydantic model
+   construction when the signal arrived, producing a spurious traceback and no
+   output. The stream checks now use 20 seconds and the stdio EOF check 30
+   seconds. No assertion was relaxed; only the startup allowance grew.
+
+2. **The attached fleet was asserted to be all-`PASS` at 60x speed.**
+   The server's real-time driver advances simulated time 60 times faster than
+   wall clock, and the freshness heuristic blocks a point at 10 missed 30-second
+   intervals. That is 5 simulated minutes, or 5 real seconds at 60x. Once the
+   first HTTP query lands more than 5 seconds after startup, one vehicle is
+   legitimately `BLOCK`. The attached check now asserts the fleet-level trust
+   score and the verdict mix; the exact all-`PASS` fleet is still asserted by
+   the embedded sessions (fixed clock) and by the 600-vehicle baseline.
+
 ## Reproduce
 
 ```bash
 ./e2e_test.sh
 ```
 
-Requires bash, coreutils `timeout`, `setsid`, `python3`, and `uv`. The suite
-binds an ephemeral loopback port only; it never uses `0.0.0.0`.
+Requires Linux, bash, coreutils `timeout`, `python3`, and `uv`. The suite
+starts the server directly with `.venv/bin/telematics`, so the captured PID is
+the server itself; it binds an ephemeral loopback port only and never uses
+`0.0.0.0`.
 
 ## Not verified in this pass
 

@@ -46,3 +46,10 @@ python_version = "3.12"
 strict = true
 mypy_path = "src"
 
+[tool.coverage.run]
+source = ["telematics"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+
