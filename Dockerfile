@@ -1,4 +1,4 @@
-FROM python:3.12-slim AS builder
+FROM python:3.15-slim AS builder
 
 ENV UV_VERSION=0.13.7 UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 RUN python -m pip install --no-cache-dir "uv==${UV_VERSION}"
@@ -8,7 +8,7 @@ COPY src ./src
 RUN uv export --frozen --no-dev --no-emit-project -o /build/requirements.txt
 RUN uv build --wheel --out-dir /wheels
 
-FROM python:3.12-slim AS runtime
+FROM python:3.15-slim AS runtime
 ENV VIRTUAL_ENV=/opt/venv PATH="/opt/venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp
 RUN apt-get update \
     && apt-get upgrade -y \
